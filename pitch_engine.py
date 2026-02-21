@@ -23,7 +23,7 @@ SEVERITY_LEVELS = {"low", "medium", "high", "critical"}
 
 
 def _gemini_model() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-3.1-pro")
+    return os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 VALIDATION_OUTCOME_BLOCKED = "blocked_fabrication"
 VALIDATION_OUTCOME_CLARIFY = "needs_clarification"
 VALIDATION_OUTCOME_READY = "ready_for_final_review"
@@ -546,9 +546,9 @@ def _collect_validation_questions(
 
 def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
-    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("GOOGLE_API_KEY is required for validator agents.")
+        raise RuntimeError("GEMINI_API_KEY is required for validator agents.")
 
     try:
         genai.configure(api_key=api_key)

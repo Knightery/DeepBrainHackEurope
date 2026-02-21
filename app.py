@@ -62,13 +62,13 @@ def _now_iso() -> str:
 def _gemini_model() -> str:
     import os
 
-    return os.getenv("GEMINI_MODEL", "gemini-3.1-pro")
+    return os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 
 def _get_client() -> genai.GenerativeModel | None:
     import os
 
-    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
     genai.configure(api_key=api_key)
@@ -329,7 +329,7 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
         await cl.Message(
             content=(
                 "Evaluation failed because validator agents could not run.\n"
-                "Please ensure `GOOGLE_API_KEY` is configured and retry."
+                "Please ensure `GEMINI_API_KEY` is configured and retry."
             )
         ).send()
         return
@@ -383,7 +383,7 @@ async def on_chat_start() -> None:
     await cl.Message(content=_checklist_markdown(draft)).send()
     if _get_client() is None:
         await cl.Message(
-            content="`GOOGLE_API_KEY` is not detected. Running in local clarifier mode only."
+            content="`GEMINI_API_KEY` is not detected. Running in local clarifier mode only."
         ).send()
 
 

@@ -76,7 +76,7 @@ Use Docker Compose from inside `cua/`:
 ```powershell
 cd cua
 docker compose build
-docker compose run --rm --remove-orphans data-fetcher "https://www.netflix.com/tudum/top10" "Fetch global top 10 lists"
+docker compose run --rm --remove-orphans data-fetcher "https://www.netflix.com/tudum/top10" "Fetch global top 10 lists from download tab" "NetflixTop10.xlsx"
 ```
 
 Watch the live desktop at `http://localhost:6080`.
@@ -86,6 +86,16 @@ Model selection:
 - Default is `claude-sonnet-4-5-20250929` (recommended for stronger web navigation reliability).
 - For cheaper testing, set `ANTHROPIC_MODEL=claude-haiku-4-5-20251001`.
 - Tool version is auto-paired in `cua/data_fetcher.py`, or can be overridden with `CUA_TOOL_VERSION`.
+
+CUA fetch behavior:
+
+- The agent is now GUI-only in `cua/data_fetcher.py`: it must navigate and click in-browser controls.
+- Bash/terminal/script workarounds (`bash`, `curl`, `wget`, inline Python) are treated as a run violation.
+- Success is strict: a new downloaded file must appear in `~/Downloads` and match allowed data extensions.
+- If an `expected_filename` is provided (3rd CLI arg), the run fails unless that exact filename is downloaded.
+- Default allowed extensions: `.csv,.tsv,.xlsx,.xls,.json,.zip`.
+- Default disallowed extensions: `.html,.htm`.
+- Optional overrides: `CUA_ALLOWED_EXTENSIONS` and `CUA_DISALLOWED_EXTENSIONS` (comma-separated).
 
 Important: `docker run build` is not a valid build command. Use `docker compose build` (or `docker build`).
 

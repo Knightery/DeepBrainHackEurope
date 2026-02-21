@@ -131,10 +131,20 @@ Outputs:
 - source/provenance log,
 - submitted-vs-source match indicators.
 
+Runtime contract (CUA mode):
+- Browser interaction must be GUI-driven (computer-use actions).
+- Terminal/script shortcuts for fetching are disallowed for CUA verification runs.
+- A run is successful only when a new downloadable artifact is saved to Downloads and passes allowed extension checks.
+- If an exact expected filename is supplied, run must fail unless that exact filename is downloaded.
+
 Critical examples:
 - `UNREACHABLE_SOURCE_ALL`
 - `SOURCE_MISMATCH_SEVERE`
 - `MISSING_SOURCE_URLS`
+- `GUI_ONLY_VIOLATION`
+- `NO_NEW_DOWNLOAD`
+- `INVALID_FILE_TYPE`
+- `EXPECTED_FILE_NOT_FOUND`
 
 ### 8.2 Data Validator
 Checks:

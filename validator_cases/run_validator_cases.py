@@ -78,8 +78,8 @@ def summarize(result: dict) -> dict:
 
 def main() -> int:
     load_dotenv()
-    if not os.getenv("GOOGLE_API_KEY"):
-        print("GOOGLE_API_KEY is missing. Add it to .env, then rerun this script.")
+    if not os.getenv("GEMINI_API_KEY"):
+        print("GEMINI_API_KEY is missing. Add it to .env, then rerun this script.")
         return 1
 
     for case in build_cases():

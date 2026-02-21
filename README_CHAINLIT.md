@@ -13,9 +13,9 @@ pip install -r requirements.txt
 `.env` must include:
 
 ```env
-GOOGLE_API_KEY=your_key_here
+GEMINI_API_KEY=your_key_here
 # optional
-GEMINI_MODEL=gemini-3.1-pro
+GEMINI_MODEL=gemini-3.1-pro-preview
 ```
 
 ## 3) Run the app
@@ -28,7 +28,7 @@ Then open the local URL shown by Chainlit.
 
 ## Notes
 
-- `cua/` is intentionally not touched by this app and still uses Anthropic credentials.
+- `cua/` is intentionally not touched by this app, still uses Anthropic credentials, and enforces GUI-only fetch validation in `cua/data_fetcher.py`.
 - Uploaded files and session artifacts are written under `data/pitches/{pitch_id}`.
 - Files are uploaded from the normal chat attachment UI (no `/upload` command).
 - Evaluation requires: thesis, time horizon (`days|weeks|months|years`), stock tickers, methodology summary, and source URL(s).
