@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Anyquant | Eva Agent API</title>
+    <title>OpenQuant | Eva Agent API</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,500;1,600&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
         html { scroll-behavior: smooth; overscroll-behavior: none; }
@@ -23,7 +23,23 @@
             backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
             box-shadow: 0 1px 0 rgba(255,255,255,0.06);
         }
-        .logo img { height: 40px; display: block; filter: brightness(1.1); }
+        .logo {
+            display: inline-flex; align-items: center; gap: 10px;
+            color: #fff; text-decoration: none; font-size: 1.75rem;
+            letter-spacing: 0.02em;
+        }
+        .logo-pixels {
+            display: flex; flex-direction: column; gap: 2px;
+            align-self: center; line-height: 0;
+            transform: translateY(2px);
+        }
+        .logo-pixels span {
+            display: block; width: 6px; height: 6px; background: #fff;
+        }
+        .logo-open, .logo-quant {
+            font-family: 'Cormorant Garamond', Georgia, serif;
+            font-style: italic; font-weight: 600; line-height: 1;
+        }
         .nav-links { display: flex; align-items: center; gap: 28px; }
         .nav-links a {
             color: rgba(255,255,255,0.6); text-decoration: none;
@@ -33,13 +49,14 @@
         .nav-links a.active { color: #fff; }
         .btn-launch {
             display: inline-flex; align-items: center; gap: 6px;
-            padding: 9px 22px; background: #fff; color: #000;
+            padding: 9px 22px; background: #fff; color: #000 !important;
             text-decoration: none; border-radius: 7px;
             font-weight: 600; font-size: 0.88rem; font-family: inherit;
             transition: all 0.25s; border: none; cursor: pointer;
         }
         .btn-launch:hover {
-            background: #e0e0e0; transform: translateY(-1px);
+            background: #e0e0e0; color: #000 !important;
+            transform: translateY(-1px);
             box-shadow: 0 4px 20px rgba(255,255,255,0.12);
         }
 
@@ -251,7 +268,10 @@
 <canvas id="bgCanvas" class="grid-bg"></canvas>
 
 <nav>
-    <a class="logo" href="/home"><img src="/home/static/Anyquant_banner.png" alt="Anyquant"></a>
+    <a class="logo" href="/home">
+        <span class="logo-pixels"><span></span><span></span><span></span></span>
+        <span><span class="logo-open">Open</span><span class="logo-quant">Quant</span></span>
+    </a>
     <div class="nav-links">
         <a href="/home">Home</a>
         <a href="/eva-api" class="active">Eva API</a>
@@ -320,7 +340,7 @@
         <div class="section-desc">RESTful API with SDKs for Python, TypeScript, and Java. Webhook support for async workflows.</div>
         <div class="code-block">
             <div class="lang-badge">Python</div>
-<pre><span class="kw">from</span> anyquant <span class="kw">import</span> EvaClient
+<pre><span class="kw">from</span> openquant <span class="kw">import</span> EvaClient
 
 client = EvaClient(api_key=<span class="str">"aq_live_..."</span>)
 
@@ -409,7 +429,7 @@ result = client.evaluate(
     </div>
 </section>
 
-<footer><p>&copy; 2026 Anyquant. All rights reserved.</p></footer>
+<footer><p>&copy; 2026 OpenQuant. All rights reserved.</p></footer>
 
 <script>
 // Background grid

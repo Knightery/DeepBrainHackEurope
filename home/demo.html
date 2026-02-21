@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Anyquant | API Dashboard</title>
+    <title>OpenQuant | API Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,500;1,600&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
         html { overscroll-behavior: none; }
@@ -24,7 +24,23 @@
             border-bottom: 1px solid rgba(255,255,255,0.06);
         }
         .topbar .left { display: flex; align-items: center; gap: 20px; }
-        .topbar .logo img { height: 34px; display: block; filter: brightness(1.1); }
+        .topbar .logo {
+            display: inline-flex; align-items: center; gap: 8px;
+            color: #fff; text-decoration: none; font-size: 1.5rem;
+            letter-spacing: 0.02em;
+        }
+        .topbar .logo-pixels {
+            display: flex; flex-direction: column; gap: 2px;
+            align-self: center; line-height: 0;
+            transform: translateY(2px);
+        }
+        .topbar .logo-pixels span {
+            display: block; width: 5px; height: 5px; background: #fff;
+        }
+        .topbar .logo-open, .topbar .logo-quant {
+            font-family: 'Cormorant Garamond', Georgia, serif;
+            font-style: italic; font-weight: 600; line-height: 1;
+        }
         .topbar .env-badge {
             padding: 3px 10px; border-radius: 4px;
             font-family: 'JetBrains Mono', monospace; font-size: 0.68rem;
@@ -265,7 +281,10 @@
 
 <div class="topbar">
     <div class="left">
-        <a class="logo" href="/home"><img src="/home/static/Anyquant_banner.png" alt="Anyquant"></a>
+        <a class="logo" href="/home">
+            <span class="logo-pixels"><span></span><span></span><span></span></span>
+            <span><span class="logo-open">Open</span><span class="logo-quant">Quant</span></span>
+        </a>
         <span class="env-badge">demo</span>
     </div>
     <div class="right">

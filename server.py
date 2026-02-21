@@ -38,9 +38,13 @@ async def demo():
 
 app.mount("/home/static", StaticFiles(directory=HOME_DIR), name="home-static")
 
+# Mount Chainlit app at /app (run from project root: uvicorn server:app --host 0.0.0.0 --port 8000)
 try:
     from chainlit.utils import mount_chainlit
 
-    mount_chainlit(app=app, target="app.py", path="/app")
-except Exception:
-    pass
+    _app_path = Path(__file__).parent / "app.py"
+    mount_chainlit(app=app, target=str(_app_path), path="/app")
+except Exception as e:
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger(__name__).warning("Chainlit mount failed: %s. App will not be available at /app.", e)
