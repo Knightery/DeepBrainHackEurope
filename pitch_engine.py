@@ -1248,7 +1248,6 @@ def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, A
                 max_output_tokens=8192,
                 system_instruction=system_prompt,
                 response_mime_type="application/json",
-                response_schema=ValidatorResponseSchema,
             ),
         )
         raw_text = (getattr(response, "text", "") or "").strip()

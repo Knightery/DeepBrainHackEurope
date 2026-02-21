@@ -377,6 +377,40 @@ def _file_schema_summary(filename: str, content: str, max_rows: int = 8) -> str:
     ).strip()
 
 
+def _sanitize_staged_filename(raw_name: str, fallback_prefix: str) -> str:
+    """
+    Keep only a filesystem-safe leaf filename for temp staging.
+    Prevents path traversal and absolute-path writes.
+    """
+    text = str(raw_name or "").strip().replace("\x00", "")
+    leaf = text.replace("\\", "/").split("/")[-1]
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", leaf).strip("._")
+    if not safe:
+        safe = fallback_prefix
+    return safe[:180]
+
+
+def _normalize_staged_files(files: list[tuple[str, str]], fallback_prefix: str) -> list[tuple[str, str]]:
+    """
+    Sanitize filenames and de-duplicate after normalization.
+    Keeps filenames stable for both CREATE and RUN phases.
+    """
+    normalized: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index, (fname, content) in enumerate(files, start=1):
+        base = _sanitize_staged_filename(fname, f"{fallback_prefix}_{index}")
+        stem = Path(base).stem or f"{fallback_prefix}_{index}"
+        suffix = Path(base).suffix
+        candidate = base
+        counter = 1
+        while candidate.lower() in seen:
+            candidate = f"{stem}_{counter}{suffix}"
+            counter += 1
+        seen.add(candidate.lower())
+        normalized.append((candidate, content if isinstance(content, str) else str(content)))
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Helper — extract JSON from Claude response text
 # ---------------------------------------------------------------------------
@@ -537,17 +571,27 @@ def _phase_run(
     Returns (stdout, stderr, returncode).
     Timeouts are returned as ("TIMEOUT", ...) so the review phase can be specific.
     """
+    tmp_root = tmp_dir.resolve()
+
+    def _write_staged_file(filename: str, content: str) -> None:
+        target = (tmp_root / filename).resolve()
+        try:
+            target.relative_to(tmp_root)
+        except ValueError as exc:
+            raise ValueError(f"Unsafe staged filename: {filename!r}") from exc
+        target.write_text(content, encoding="utf-8")
+
     # Write generated runner
     runner_path = tmp_dir / "_backtest_runner.py"
     runner_path.write_text(script, encoding="utf-8")
 
     # Copy strategy files
     for fname, content in strategy_files:
-        (tmp_dir / fname).write_text(content, encoding="utf-8")
+        _write_staged_file(fname, content)
 
     # Copy data files
     for fname, content in data_files:
-        (tmp_dir / fname).write_text(content, encoding="utf-8")
+        _write_staged_file(fname, content)
 
     try:
         result = subprocess.run(
@@ -667,6 +711,9 @@ def run_backtest_agent(
     prior_script: str | None = None
     prior_stdout: str | None = None
     prior_stderr: str | None = None
+
+    strategy_files = _normalize_staged_files(strategy_files, "strategy")
+    data_files = _normalize_staged_files(data_files, "data")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="backtest_agent_"))
 

@@ -26,6 +26,7 @@ from pitch_engine import (
     strip_tagged_json,
     validate_data_with_cua,
 )
+from pitch_db import append_pitch_message, save_pitch_result, upsert_pitch_snapshot
 
 try:
     from backtest_agent import run_backtest_agent as _run_backtest_agent
@@ -113,19 +114,23 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 def _save_pitch_snapshot(draft: PitchDraft) -> None:
     draft_path = _pitch_dir(draft.pitch_id) / "pitch.json"
-    _write_json(draft_path, draft.to_dict())
+    payload = draft.to_dict()
+    _write_json(draft_path, payload)
+    upsert_pitch_snapshot(payload, _now_iso())
 
 
 def _append_chat_event(draft: PitchDraft, role: str, content: str) -> None:
+    now_iso = _now_iso()
     history_path = _pitch_dir(draft.pitch_id) / "clarifier_history.jsonl"
     _append_jsonl(
         history_path,
         {
-            "timestamp_utc": _now_iso(),
+            "timestamp_utc": now_iso,
             "role": role,
             "content": content,
         },
     )
+    append_pitch_message(draft.pitch_id, now_iso, role, content)
 
 
 def _new_pitch() -> PitchDraft:
@@ -294,13 +299,28 @@ async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> str:
 def _copy_to_pitch_uploads(draft: PitchDraft, src_path: Path, original_name: str, mime_type: str, size: int) -> UploadedFile:
     upload_dir = _pitch_dir(draft.pitch_id) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
-    destination = upload_dir / original_name
+
+    raw_name = str(original_name or "").strip().replace("\x00", "")
+    leaf_name = raw_name.replace("\\", "/").split("/")[-1]
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", leaf_name).strip("._")
+    if not safe_name:
+        safe_name = f"upload_{uuid.uuid4().hex[:8]}"
+
+    destination = (upload_dir / safe_name).resolve()
+    upload_root = upload_dir.resolve()
+    try:
+        destination.relative_to(upload_root)
+    except ValueError as exc:
+        raise ValueError(f"Unsafe upload filename: {original_name!r}") from exc
+
     if destination.exists():
-        destination = upload_dir / f"{uuid.uuid4().hex[:8]}_{original_name}"
+        destination = (upload_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}").resolve()
+        destination.relative_to(upload_root)
+
     shutil.copy2(src_path, destination)
     return UploadedFile(
         file_id=f"fil_{uuid.uuid4().hex[:12]}",
-        name=original_name,
+        name=safe_name,
         path=str(destination),
         mime_type=mime_type or "",
         size_bytes=size if size > 0 else destination.stat().st_size,
@@ -408,8 +428,9 @@ def _build_cua_context_for_file(draft: PitchDraft, file_entry: UploadedFile, rea
     note_parts = [
         f"automatic full-pitch validation ({reason})",
         f"expected_reference_file={file_entry.name}",
-        f"expected_file_format={expected_format}",
-        "strict requirement: downloaded source artifact must match reference schema/entity/date range",
+        "goal: confirm the data on the source page(s) is consistent with what the user submitted — same entity, same rough date range, same order of magnitude for prices/values",
+        "do NOT fail because of missing columns or format differences — the user may have cleaned or subsetted the data",
+        "flag only if the source page shows clearly different data, a different asset, or the page is unreachable",
     ]
     if scoped_urls:
         note_parts.append("expected_source_urls=" + ", ".join(scoped_urls))
@@ -442,58 +463,18 @@ def _merge_cua_outputs(per_file_outputs: dict[str, dict[str, Any]]) -> dict[str,
     total_latency = 0
     confidence_sum = 0.0
     match_rates: list[float] = []
-    ok_count = 0
+    failed_files: list[str] = []
 
     for file_name, output in per_file_outputs.items():
         total_latency += int(output.get("latency_ms", 0) or 0)
         confidence_sum += float(output.get("confidence", 0.0) or 0.0)
-        status = str(output.get("status", "warn")).lower()
-        if status == "ok":
-            ok_count += 1
+        file_status = str(output.get("status", "warn")).lower()
 
         artifacts = output.get("artifacts", {})
         if isinstance(artifacts, dict):
             match = artifacts.get("match_rate")
             if isinstance(match, (int, float)):
                 match_rates.append(float(match))
-            expected_format = str(artifacts.get("expected_file_format", "")).strip().lower()
-            expected_urls = artifacts.get("expected_source_urls", [])
-            checked_urls = artifacts.get("source_urls_checked", [])
-            candidate_downloads = artifacts.get("candidate_downloaded_files", [])
-
-            if expected_format:
-                valid_ext = {expected_format}
-                if expected_format in {"csv", "tsv"}:
-                    valid_ext = {"csv", "tsv"}
-                has_matching_format = False
-                if isinstance(candidate_downloads, list):
-                    for candidate in candidate_downloads:
-                        ext = Path(str(candidate)).suffix.lower().lstrip(".")
-                        if ext in valid_ext:
-                            has_matching_format = True
-                            break
-                if not has_matching_format:
-                    merged_flags.append(
-                        {
-                            "code": "CUA_EXPECTED_FORMAT_MISMATCH",
-                            "message": f"[{file_name}] No downloaded artifact matched expected format `{expected_format}`.",
-                        }
-                    )
-                    status = "fail"
-
-            if isinstance(expected_urls, list) and expected_urls:
-                expected_set = {str(url).strip() for url in expected_urls if str(url).strip()}
-                checked_set = set()
-                if isinstance(checked_urls, list):
-                    checked_set = {str(url).strip() for url in checked_urls if str(url).strip()}
-                if not expected_set.issubset(checked_set):
-                    merged_flags.append(
-                        {
-                            "code": "CUA_EXPECTED_SOURCE_MISSING",
-                            "message": f"[{file_name}] CUA result did not include expected source link(s).",
-                        }
-                    )
-                    status = "fail"
 
         raw_flags = output.get("flags", [])
         if isinstance(raw_flags, list):
@@ -507,23 +488,18 @@ def _merge_cua_outputs(per_file_outputs: dict[str, dict[str, Any]]) -> dict[str,
                     }
                 )
 
-        if status != "ok":
-            merged_flags.append(
-                {
-                    "code": "CUA_FILE_NOT_CLEAN",
-                    "message": f"[{file_name}] CUA validation did not return status=ok.",
-                }
-            )
+        if file_status != "ok":
+            failed_files.append(file_name)
 
     total = len(per_file_outputs)
     match_rate = sum(match_rates) / len(match_rates) if match_rates else 0.0
     confidence = confidence_sum / total if total else 0.0
-    all_ok = ok_count == total
-    status = "ok" if all_ok else "fail"
+    all_ok = len(failed_files) == 0
+    status = "ok" if all_ok else "warn"
     summary = (
-        f"CUA validated all {total} data file(s) successfully."
+        f"CUA validated all {total} data file(s): no provenance issues found."
         if all_ok
-        else f"CUA found unresolved issues in {total - ok_count} of {total} data file(s)."
+        else f"CUA found potential issues in {len(failed_files)} of {total} data file(s): {', '.join(failed_files)}."
     )
     return {
         "agent": "data_fetcher",
@@ -847,7 +823,10 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
     _save_pitch_snapshot(draft)
 
     result_path = _pitch_dir(draft.pitch_id) / "result.json"
-    _write_json(result_path, result.to_dict())
+    result_dict = result.to_dict()
+    _write_json(result_path, result_dict)
+    completed_at = _now_iso() if draft.status in {"ready_for_final_review", "rejected"} else None
+    save_pitch_result(draft.pitch_id, _now_iso(), completed_at, result_dict)
     _append_chat_event(draft, "system", f"{command_name} complete. Decision={result.decision}")
 
     # Mark data loading done
