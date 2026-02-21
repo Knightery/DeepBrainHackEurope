@@ -1,0 +1,24 @@
+{
+  "ticker": "SPY",
+  "signal_warmup_start": "2005-01-03",
+  "test_start": "2010-01-04",
+  "test_end": "2024-12-27",
+  "n_test_days": 3772,
+  "n_signal_flips": 86,
+  "pct_days_long": 88.3,
+  "strategy": {
+    "cagr_pct": 6.65,
+    "ann_vol_pct": 17.07,
+    "sharpe": 0.389,
+    "max_drawdown_pct": -36.78,
+    "total_return_pct": 161.97
+  },
+  "buy_and_hold": {
+    "cagr_pct": 13.7,
+    "ann_vol_pct": 17.05,
+    "sharpe": 0.804,
+    "max_drawdown_pct": -33.72,
+    "total_return_pct": 583.77
+  },
+  "cost_bps_per_side": 1.0
+}

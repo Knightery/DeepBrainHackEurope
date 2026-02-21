@@ -177,6 +177,40 @@ Computes:
 - time to return (nullable),
 - final score + allocation via deterministic formula.
 
+### 8.5 Backtest Agent (`backtest_agent.py`)
+
+Triggered automatically during `/evaluate` (and manually via `/backtest`) when the user uploads a `.py` strategy file.
+
+**File role detection** (auto-classifies all uploaded files):
+- `.py` → strategy scripts
+- `.csv`/`.tsv` with `benchmark`/`market`/`index`/`spy` in name → benchmark files
+- other `.csv`/`.tsv` → price data files
+
+**3-attempt loop per run:**
+- **Phase 1 – CREATE/FIX**: Claude (`ANTHROPIC_MODEL`) generates a self-contained Python runner that loads the user's strategy, runs it, fetches benchmark data via `yfinance`, computes all required metrics, and prints a JSON object to stdout.
+- **Phase 2 – RUN**: `subprocess.run` executes the generated script in an isolated temp directory (timeout: `BACKTEST_TIMEOUT_SECONDS`, default 120s).
+- **Phase 3 – REVIEW**: Claude validates the JSON output and decides the termination verdict.
+
+**Termination statuses:**
+- `success` — all required fields present and valid; `strategy_scorer` composite replaces CSV-based scoring.
+- `agent_fault` — 3 attempts exhausted with self-introduced bugs; falls back to CSV scoring with a `medium` flag.
+- `user_action_required` — Claude determines the user's script is broken or missing inputs; emits a `high` flag and user-facing message.
+
+**Scoring override (when `success`):**
+```
+overall_score = 0.65 × strategy_scorer_composite
+              + 15 × data_quality_score
+              + 10 × methodology_score
+              + 10 × match_rate
+```
+
+`agent_outputs["scoring"]["artifacts"]["source"]` is set to `"strategy_scorer"` or `"csv_approximation"` for auditability.
+
+**Required output fields computed by the agent:**
+`backtest_start`, `backtest_end`, `cagr`, `total_return`, `volatility`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `max_drawdown`, `max_drawdown_duration`, `total_trades`, `win_rate`, `avg_win`, `avg_loss`, `profit_factor`, `expectancy`, `benchmark_cagr`, `benchmark_max_drawdown`, `benchmark_total_return`, `alpha`, `information_ratio`, `excess_return`, `up_capture`, `down_capture`.
+
+`name` and `ticker` are injected from the pitch context.
+
 ## 9) Scoring & Allocation Policy (v0)
 
 ### 9.1 Composite score (0-100)

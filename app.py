@@ -16,6 +16,7 @@ from google.genai import types
 from pitch_engine import (
     PitchDraft,
     UploadedFile,
+    _detect_file_roles,
     evaluate_pitch,
     extract_tagged_json,
     file_sha256,
@@ -23,6 +24,12 @@ from pitch_engine import (
     strip_tagged_json,
     validate_data_with_cua,
 )
+
+try:
+    from backtest_agent import run_backtest_agent as _run_backtest_agent
+    _BACKTEST_AVAILABLE = True
+except ImportError:
+    _BACKTEST_AVAILABLE = False
 
 load_dotenv()
 
@@ -53,6 +60,7 @@ Commands:
 - `/checklist` show onboarding checklist
 - `/evaluate` run validation and scoring
 - `/validate` re-run the validation loop after clarifications
+- `/backtest` run Claude backtest agent on uploaded strategy script
 - `/validate_data "file_to_validate" "notes"` run CUA data-source validation for one uploaded file
 - `/reset` start a new pitch
 - `/help` show commands
@@ -391,6 +399,117 @@ def _parse_validate_data_command(content: str) -> tuple[str | None, str | None, 
     return file_name, notes, None
 
 
+async def _handle_backtest_command(draft: PitchDraft) -> None:
+    """Run the Claude backtest agent on uploaded strategy .py files."""
+    if not _BACKTEST_AVAILABLE:
+        await cl.Message(
+            content=(
+                "Backtest agent is unavailable. "
+                "Ensure `anthropic` is installed and `ANTHROPIC_API_KEY` is set."
+            )
+        ).send()
+        return
+
+    roles = _detect_file_roles(draft.uploaded_files)
+    if not roles["strategy_scripts"]:
+        await cl.Message(
+            content=(
+                "No strategy script found. Upload a `.py` file containing your strategy "
+                "and optionally a price data CSV, then run `/backtest` again."
+            )
+        ).send()
+        return
+
+    script_names = ", ".join(f"`{f.name}`" for f in roles["strategy_scripts"])
+    data_names = ", ".join(f"`{f.name}`" for f in roles["data_files"] + roles["benchmark_files"])
+    await cl.Message(
+        content=(
+            f"Starting backtest agent for {script_names}.\n"
+            f"Data files: {data_names or '(none — agent will use yfinance)'}.\n\n"
+            "**Phase 1** — generating standardised runner script..."
+        )
+    ).send()
+
+    _strat_files: list[tuple[str, str]] = []
+    for _f in roles["strategy_scripts"]:
+        try:
+            _strat_files.append((_f.name, Path(_f.path).read_text(encoding="utf-8", errors="replace")))
+        except Exception:
+            pass
+
+    _data_files: list[tuple[str, str]] = []
+    for _f in roles["data_files"] + roles["benchmark_files"]:
+        try:
+            _data_files.append((_f.name, Path(_f.path).read_text(encoding="utf-8", errors="replace")))
+        except Exception:
+            pass
+
+    ticker = draft.tickers[0] if draft.tickers else "UNKNOWN"
+
+    await cl.Message(content="**Phase 2** — running backtest script...").send()
+
+    result = await cl.make_async(_run_backtest_agent)(
+        strategy_files=_strat_files,
+        data_files=_data_files,
+        pitch_context={"name": draft.pitch_id, "ticker": ticker},
+    )
+
+    await cl.Message(content="**Phase 3** — reviewing results...").send()
+
+    # Save backtest agent output
+    backtest_path = _pitch_dir(draft.pitch_id) / "agent_outputs" / "backtest_agent.json"
+    _write_json(backtest_path, result.to_dict())
+    _append_chat_event(
+        draft,
+        "system",
+        f"/backtest status={result.status} attempts={result.attempt_count}",
+    )
+
+    if result.status == "success" and result.metrics:
+        m = result.metrics
+        lines = [
+            "## Backtest Agent — Success ✓",
+            f"Completed in **{result.attempt_count}** attempt(s).\n",
+            "### Key Metrics",
+            f"| Metric | Strategy | Benchmark |",
+            f"|--------|----------|-----------|",
+            f"| CAGR | `{float(m.get('cagr', 0)):.2%}` | `{float(m.get('benchmark_cagr', 0)):.2%}` |",
+            f"| Total Return | `{float(m.get('total_return', 0)):.2%}` | `{float(m.get('benchmark_total_return', 0)):.2%}` |",
+            f"| Max Drawdown | `{float(m.get('max_drawdown', 0)):.2%}` | `{float(m.get('benchmark_max_drawdown', 0)):.2%}` |",
+            f"| Sharpe | `{float(m.get('sharpe_ratio', 0)):.3f}` | — |",
+            f"| Sortino | `{float(m.get('sortino_ratio', 0)):.3f}` | — |",
+            f"| Calmar | `{float(m.get('calmar_ratio', 0)):.3f}` | — |",
+            f"| Excess Return | `{float(m.get('excess_return', 0)):.2%}` | — |",
+            f"| Alpha | `{float(m.get('alpha', 0)):.4f}` | — |",
+            f"| Win Rate | `{float(m.get('win_rate', 0)):.1%}` | — |",
+            f"| Total Trades | `{m.get('total_trades', 0)}` | — |",
+            f"| Profit Factor | `{float(m.get('profit_factor', 0)):.2f}` | — |",
+            f"| Up Capture | `{float(m.get('up_capture', 0)):.2f}` | — |",
+            f"| Down Capture | `{float(m.get('down_capture', 0)):.2f}` | — |",
+            "",
+            "Run `/evaluate` to include these results in the full evaluation pipeline.",
+        ]
+        await cl.Message(content="\n".join(lines)).send()
+
+    elif result.status == "user_action_required":
+        await cl.Message(
+            content=(
+                "## Backtest Agent — User Action Required\n\n"
+                f"{result.message}\n\n"
+                "Please fix the issue above and re-upload your files, then run `/backtest` again."
+            )
+        ).send()
+
+    else:  # agent_fault
+        await cl.Message(
+            content=(
+                "## Backtest Agent — Could Not Complete\n\n"
+                f"{result.message}\n\n"
+                "The evaluation will fall back to CSV-based scoring when you run `/evaluate`."
+            )
+        ).send()
+
+
 async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None:
     file_name, notes, error = _parse_validate_data_command(content)
     if error:
@@ -482,6 +601,9 @@ async def on_message(message: cl.Message) -> None:
             return
         if command == "/validate":
             await _handle_evaluate_command(draft, "/validate")
+            return
+        if command == "/backtest":
+            await _handle_backtest_command(draft)
             return
         if command == "/validate_data":
             await _handle_validate_data_command(draft, content)

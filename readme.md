@@ -11,6 +11,7 @@ Quant Pitch Evaluator helps strong independent quants submit stock ideas and get
 - Collects a pitch through an interactive chat workflow.
 - Standardizes core inputs (thesis, horizon, stocks, methodology, sources).
 - Runs parallel evaluators to assess data quality, methodology risk, and performance metrics.
+- **Runs a Claude backtest agent** to generate and execute a standardized runner from the user's strategy script, computing all scored metrics automatically.
 - Produces a final score, recommendation, and allocation amount.
 - Supports final human reviewer approval or rejection.
 
@@ -24,8 +25,11 @@ Quant Pitch Evaluator helps strong independent quants submit stock ideas and get
    - stock ticker(s) (just symbols like `AAPL, MSFT`),
    - methodology summary,
    - source URL(s) for submitted data.
-4. User can upload supporting files.
-5. Evaluation runs when all mandatory checklist items are complete.
+4. User uploads supporting files:
+   - **strategy script** (`.py`) — required for backtest agent scoring.
+   - **price data CSV** — used by both the backtest agent and CSV-based fallback.
+   - benchmark CSV (optional, filename must contain `benchmark`/`market`/`spy`) — auto-detected.
+5. User can run `/backtest` to test the backtest agent standalone before `/evaluate`.
 6. Evaluation outcome:
    - fabricated/cheating signal -> `Goodbye.`
    - missing/unclear validation aspects -> clarification loop and `/validate`
@@ -65,6 +69,7 @@ Model configuration is environment-driven:
 
 - App + evaluators read `GEMINI_MODEL` from `.env`.
 - CUA fetcher reads `ANTHROPIC_MODEL` from `.env`.
+- Backtest agent reads `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` from `.env` (same key as CUA, but used directly in-process — no Docker required).
 
 ## Optional: CUA data fetcher (Docker)
 

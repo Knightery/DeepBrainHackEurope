@@ -22,6 +22,14 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
+# Optional backtest agent and strategy scorer (requires anthropic package)
+try:
+    from backtest_agent import BacktestTermination, run_backtest_agent  # noqa: F401
+    from strategy_scorer import score_strategy, validate_and_load
+    _BACKTEST_AGENT_AVAILABLE = True
+except ImportError:
+    _BACKTEST_AGENT_AVAILABLE = False
+
 REQUIRED_FIELDS = ("thesis", "time_horizon", "methodology_summary")
 TIME_HORIZON_VALUES = {"days", "weeks", "months", "years"}
 SEVERITY_LEVELS = {"low", "medium", "high", "critical"}
@@ -398,6 +406,40 @@ def _match_rate(draft: PitchDraft) -> float:
     if draft.source_urls or draft.uploaded_files:
         return 0.5
     return 0.0
+
+
+def _detect_file_roles(uploaded_files: list[UploadedFile]) -> dict[str, list[UploadedFile]]:
+    """
+    Classify uploaded files into roles for the evaluation pipeline.
+
+    Returns:
+        {
+            "strategy_scripts": [.py files],
+            "data_files":        [.csv/.tsv non-benchmark files],
+            "benchmark_files":   [.csv/.tsv with 'benchmark'/'market'/etc in name],
+        }
+    """
+    strategy_scripts: list[UploadedFile] = []
+    data_files: list[UploadedFile] = []
+    benchmark_files: list[UploadedFile] = []
+
+    for f in uploaded_files:
+        suffix = Path(f.path).suffix.lower()
+        name_lower = f.name.lower()
+
+        if suffix == ".py":
+            strategy_scripts.append(f)
+        elif suffix in {".csv", ".tsv"}:
+            if any(kw in name_lower for kw in ("benchmark", "market", "index", "spy", "bm_")):
+                benchmark_files.append(f)
+            else:
+                data_files.append(f)
+
+    return {
+        "strategy_scripts": strategy_scripts,
+        "data_files": data_files,
+        "benchmark_files": benchmark_files,
+    }
 
 
 def _compute_allocation(score: float, horizon: str | None) -> int:
@@ -1243,6 +1285,57 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     auditor_flags: list[dict[str, str]] = []
     fetcher_flags: list[dict[str, str]] = []
 
+    # --- Backtest agent ---
+    # When the user uploads a strategy .py, Claude generates and runs a standardised
+    # backtest runner that computes all strategy_scorer.Strategy metrics.
+    # Falls back to CSV-based scoring when no .py is present or agent cannot complete.
+    backtest_result: Any = None
+    backtest_scored: Any = None
+    roles = _detect_file_roles(draft.uploaded_files)
+    if roles["strategy_scripts"] and _BACKTEST_AGENT_AVAILABLE:
+        _strat_files: list[tuple[str, str]] = []
+        for _f in roles["strategy_scripts"]:
+            try:
+                _strat_files.append((_f.name, Path(_f.path).read_text(encoding="utf-8", errors="replace")))
+            except Exception:
+                pass
+        _data_files: list[tuple[str, str]] = []
+        for _f in roles["data_files"] + roles["benchmark_files"]:
+            try:
+                _data_files.append((_f.name, Path(_f.path).read_text(encoding="utf-8", errors="replace")))
+            except Exception:
+                pass
+        _ticker = draft.tickers[0] if draft.tickers else "UNKNOWN"
+        if _strat_files:
+            backtest_result = run_backtest_agent(
+                strategy_files=_strat_files,
+                data_files=_data_files,
+                pitch_context={"name": draft.pitch_id, "ticker": _ticker},
+            )
+            if backtest_result.status == "success" and backtest_result.metrics:
+                _strategy_obj, _v_errors = validate_and_load(backtest_result.metrics)
+                if _strategy_obj:
+                    backtest_scored = score_strategy(_strategy_obj)
+                    if backtest_scored.disqualified:
+                        for _reason in backtest_scored.disqualification_reasons:
+                            if _reason not in hard_reject_reasons:
+                                hard_reject_reasons.append(_reason)
+            elif backtest_result.status == "user_action_required":
+                auditor_flags.append({
+                    "code": "BACKTEST_USER_ACTION_REQUIRED",
+                    "severity": "high",
+                    "message": backtest_result.message,
+                })
+            elif backtest_result.status == "agent_fault":
+                auditor_flags.append({
+                    "code": "BACKTEST_AGENT_FAULT",
+                    "severity": "medium",
+                    "message": (
+                        f"Backtest agent failed after {backtest_result.attempt_count} attempt(s). "
+                        "Falling back to CSV-based scoring."
+                    ),
+                })
+
     if not draft.source_urls:
         hard_reject_reasons.append("No source URL was provided for submitted data.")
         fetcher_flags.append(
@@ -1378,14 +1471,23 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     validator_flags.extend(fabrication_result["flags"])
     auditor_flags.extend(coding_errors_result["flags"])
 
-    score = 100.0 * (
-        (0.30 * sharpe_n)
-        + (0.20 * drawdown_n)
-        + (0.15 * risk_n)
-        + (0.15 * data_quality_score)
-        + (0.10 * method_score)
-        + (0.10 * match_rate)
-    )
+    if backtest_scored is not None and not backtest_scored.disqualified:
+        # Richer formula: 65% strategy-scorer composite + 35% data/methodology/provenance
+        score = (
+            0.65 * backtest_scored.composite_score
+            + 15.0 * data_quality_score
+            + 10.0 * method_score
+            + 10.0 * match_rate
+        )
+    else:
+        score = 100.0 * (
+            (0.30 * sharpe_n)
+            + (0.20 * drawdown_n)
+            + (0.15 * risk_n)
+            + (0.15 * data_quality_score)
+            + (0.10 * method_score)
+            + (0.10 * match_rate)
+        )
     overall_score = round(score, 1)
 
     has_critical = any(flag["severity"] == "critical" for flag in (validator_flags + auditor_flags + fetcher_flags))
@@ -1483,14 +1585,39 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         "scoring": {
             "agent": "scoring",
             "status": "ok",
-            "confidence": 0.8,
-            "summary": "Deterministic v0 scoring and allocation.",
+            "confidence": 0.9 if (backtest_scored and not backtest_scored.disqualified) else 0.8,
+            "summary": (
+                "Strategy-scorer composite from backtest agent."
+                if (backtest_scored and not backtest_scored.disqualified)
+                else "Deterministic v0 CSV-based scoring."
+            ),
             "flags": [],
             "artifacts": {
+                "source": "strategy_scorer" if (backtest_scored and not backtest_scored.disqualified) else "csv_approximation",
                 "sharpe": round(sharpe, 4),
                 "max_drawdown": round(max_drawdown, 4),
                 "risk_score": round(risk_score, 4),
                 "time_to_return_days": time_to_return_days,
+                **(
+                    {
+                        "composite_score": backtest_scored.composite_score,
+                        "disqualified": backtest_scored.disqualified,
+                        "disqualification_reasons": backtest_scored.disqualification_reasons,
+                        "component_scores": {
+                            c.label: {
+                                "score": round(c.raw_score, 3),
+                                "weight": c.weight,
+                                "weighted": round(c.weighted_score, 3),
+                                "category": c.category,
+                            }
+                            for c in backtest_scored.component_scores
+                        },
+                        "backtest_attempt_count": backtest_result.attempt_count if backtest_result else 0,
+                        "backtest_metrics": backtest_result.metrics if backtest_result else None,
+                    }
+                    if backtest_scored is not None
+                    else {}
+                ),
             },
             "latency_ms": 0,
         },
@@ -1512,7 +1639,29 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         f"- Data quality score: `{round(data_quality_score, 4)}`",
         f"- Methodology score: `{round(method_score, 4)}`",
         f"- Match rate: `{round(match_rate, 4)}`",
+        f"- Scoring source: `{'strategy_scorer' if (backtest_scored and not backtest_scored.disqualified) else 'csv_approximation'}`",
     ]
+
+    if backtest_scored is not None and not backtest_scored.disqualified and backtest_result and backtest_result.metrics:
+        m = backtest_result.metrics
+        report_lines.extend([
+            "",
+            "## Strategy Backtest Metrics",
+            f"- Period: `{m.get('backtest_start', '?')}` → `{m.get('backtest_end', '?')}`",
+            f"- CAGR: `{float(m.get('cagr', 0)):.2%}`  (benchmark: `{float(m.get('benchmark_cagr', 0)):.2%}`)",
+            f"- Excess return: `{float(m.get('excess_return', 0)):.2%}`  |  Alpha: `{float(m.get('alpha', 0)):.4f}`",
+            f"- Sharpe: `{float(m.get('sharpe_ratio', 0)):.3f}`  |  Sortino: `{float(m.get('sortino_ratio', 0)):.3f}`  |  Calmar: `{float(m.get('calmar_ratio', 0)):.3f}`",
+            f"- Max drawdown: `{float(m.get('max_drawdown', 0)):.2%}`  (benchmark: `{float(m.get('benchmark_max_drawdown', 0)):.2%}`)",
+            f"- Win rate: `{float(m.get('win_rate', 0)):.1%}`  |  Trades: `{m.get('total_trades', 0)}`  |  Profit factor: `{float(m.get('profit_factor', 0)):.2f}`",
+            f"- Up capture: `{float(m.get('up_capture', 0)):.2f}`  |  Down capture: `{float(m.get('down_capture', 0)):.2f}`",
+            "",
+            "## Strategy Scorer Component Breakdown",
+        ])
+        for _c in backtest_scored.component_scores:
+            _bar = "█" * int(_c.raw_score * 20) + "░" * (20 - int(_c.raw_score * 20))
+            report_lines.append(
+                f"- `{_c.category}` **{_c.label}**: {_bar} `{_c.raw_score:.2f}` (w={_c.weight})"
+            )
 
     if hard_reject_reasons:
         report_lines.extend(["", "## Hard Reject Reasons"])
