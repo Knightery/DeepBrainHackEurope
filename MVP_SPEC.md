@@ -132,19 +132,19 @@ Outputs:
 - submitted-vs-source match indicators.
 
 Runtime contract (CUA mode):
-- Browser interaction must be GUI-driven (computer-use actions).
-- Terminal/script shortcuts for fetching are disallowed for CUA verification runs.
-- A run is successful only when a new downloadable artifact is saved to Downloads and passes allowed extension checks.
-- If an exact expected filename is supplied, run must fail unless that exact filename is downloaded.
+- Browser interaction is preferred via GUI-driven computer-use actions (CUA-first behavior).
+- Terminal/script fallbacks are allowed when GUI flow is blocked or clearly inferior.
+- CUA first inspects the submitted reference file, then navigates source pages to find matching downloadable data.
+- Matching is dynamic (schema/entity/date-range reasoning), not tied to fixed filename or extension rules.
+- Post-download file matching is reviewed by an LLM against the reference file profile.
+- If mismatch is detected, CUA is re-run with explicit retry guidance until match or retry limit is reached.
 
 Critical examples:
 - `UNREACHABLE_SOURCE_ALL`
 - `SOURCE_MISMATCH_SEVERE`
 - `MISSING_SOURCE_URLS`
-- `GUI_ONLY_VIOLATION`
+- `BASH_FALLBACK_USED`
 - `NO_NEW_DOWNLOAD`
-- `INVALID_FILE_TYPE`
-- `EXPECTED_FILE_NOT_FOUND`
 
 ### 8.2 Data Validator
 Checks:

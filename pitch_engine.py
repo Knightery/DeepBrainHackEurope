@@ -5,15 +5,20 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import google.generativeai as genai
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -30,46 +35,67 @@ VALIDATION_OUTCOME_READY = "ready_for_final_review"
 
 FABRICATION_VALIDATOR_PROMPT = """
 You are the Fabrication Detector for quant pitch evaluation.
+Your PRIMARY job: detect intentional data manipulation or fraud. You may note coding errors as secondary
+observations, but do not call them fabrication.
 
-Objective:
-- Find signs of intentional cheating or fabricated/manipulated market data.
-- Be conservative: only flag when there is concrete evidence or strong statistical suspicion.
+Verdict rules (strict):
+- verdict=fabrication: only when there is strong, concrete evidence of intentional manipulation
+  (e.g. prices are mathematically generated, volume is identically repeated, impossible market statistics
+  that cannot occur even in a buggy backtest). Requires confidence >= 0.8.
+- verdict=unclear: suspicious but insufficient evidence to confirm intent.
+- verdict=clean: no material fabrication concerns.
 
-Checklist:
-1) Impossible values (negative volume, impossible prices, repeated constants where variation is expected)
-2) Overly smooth or synthetic-looking returns inconsistent with market behavior
-3) Timestamp anomalies that suggest post-editing (non-monotonic or suspiciously regular patterns)
-4) Data/source mismatch clues between submitted data summary and declared source URLs
-5) Evidence of suspicious manual tampering patterns
+Do NOT return verdict=fabrication solely because metrics are high, a small dataset was used, or a
+methodology error inflated results. Those are coding errors, not fabrication.
 
-Output rules:
-- Return exactly one XML block with strict JSON:
-<validator_output>{"summary":"...","confidence":0.0,"flags":[{"code":"...","severity":"low|medium|high|critical","message":"..."}],"artifacts":{"verdict":"clean|fabrication|unclear","questions":[],"checklist_findings":[]}}</validator_output>
-- Use short, specific flag messages with direct evidence from input.
-- If no material concerns, return empty flags.
+Fabrication checklist:
+1) Prices or volumes that are mathematically generated (perfect increments, constant values, impossible precision)
+2) Returns that are physically impossible regardless of strategy (Sharpe > 50, zero drawdown over 30+ days)
+3) Non-monotonic timestamps or signs of post-hoc data editing
+4) Data that provably does not match the declared source (e.g. ticker mismatch, wrong price range for period)
+
+Output — strict JSON only:
+{"summary":"...","confidence":0.0,"flags":[{"code":"...","severity":"low|medium|high|critical","message":"..."}],"artifacts":{"verdict":"clean|fabrication|unclear","questions":[]}}
 """.strip()
 
 CODING_ERRORS_VALIDATOR_PROMPT = """
 You are the Coding Errors Detector for quant pitch evaluation.
+Your PRIMARY job: detect unintentional ML/quant methodology mistakes that inflate backtest quality.
+You may note suspicious data patterns as secondary observations, but your verdict must reflect
+methodology quality only — not fraud.
 
-Objective:
-- Find unintentional ML/quant methodology mistakes that inflate backtest quality.
-- Focus on methodological risk, not fraud intent.
+Verdict rules:
+- verdict=errors_found: one or more methodology errors that would materially inflate reported results.
+- verdict=clean: methodology is sound for the scope described.
 
-Checklist:
-1) Look-ahead bias / future leakage
-2) Target leakage from features
-3) Survivorship bias in ticker universe framing
-4) Overfitting or data snooping risk
-5) Weak validation protocol (no clear out-of-sample / walk-forward split)
-6) Missing transaction-cost/slippage realism for active strategies
+Methodology checklist:
+1) Look-ahead bias — features or targets derived using future data (negative shift, rolling windows not anchored to t-1)
+2) Feature leakage — target variable used as or directly derivable from input features
+3) Survivorship bias — universe constructed using post-period knowledge
+4) Overfitting / data snooping — hyperparameter search on the test set, too few observations for statistical significance
+5) Weak validation — no out-of-sample or walk-forward split documented
+6) Unrealistic assumptions — no transaction costs / slippage for high-frequency or daily rebalancing strategies
 
-Output rules:
-- Return exactly one XML block with strict JSON:
-<validator_output>{"summary":"...","confidence":0.0,"flags":[{"code":"...","severity":"low|medium|high|critical","message":"..."}],"artifacts":{"verdict":"clean|needs_clarification|unclear","questions":[],"checklist_findings":[]}}</validator_output>
-- Use actionable, concise flag messages.
-- If no material concerns, return empty flags.
+Output — strict JSON only:
+{"summary":"...","confidence":0.0,"flags":[{"code":"...","severity":"low|medium|high|critical","message":"..."}],"artifacts":{"verdict":"clean|errors_found","questions":[]}}
 """.strip()
+
+class ValidatorFlagSchema(BaseModel):
+    code: str
+    severity: str
+    message: str
+
+
+class ValidatorArtifactsSchema(BaseModel):
+    verdict: str = "unclear"
+    questions: list[str] = Field(default_factory=list)
+
+
+class ValidatorResponseSchema(BaseModel):
+    summary: str
+    confidence: float
+    flags: list[ValidatorFlagSchema] = Field(default_factory=list)
+    artifacts: ValidatorArtifactsSchema = Field(default_factory=ValidatorArtifactsSchema)
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -395,7 +421,7 @@ def _compute_allocation(score: float, horizon: str | None) -> int:
     return min(20000, allocation)
 
 
-def _safe_head_records(frame: pd.DataFrame | None, limit: int = 40) -> list[dict[str, Any]]:
+def _safe_head_records(frame: pd.DataFrame | None, limit: int = 25) -> list[dict[str, Any]]:
     if frame is None or frame.empty:
         return []
     try:
@@ -448,6 +474,534 @@ def _build_validator_payload(
             "sharpe": round(sharpe, 4),
             "max_drawdown": round(max_drawdown, 4),
         },
+    }
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _cua_dir() -> Path:
+    return _project_root() / "cua"
+
+
+def _cua_downloads_dir() -> Path:
+    return _cua_dir() / "downloads"
+
+
+def _find_uploaded_file(draft: PitchDraft, file_to_validate: str) -> UploadedFile | None:
+    requested = file_to_validate.strip().lower()
+    if not requested:
+        return None
+    for uploaded in draft.uploaded_files:
+        if uploaded.name.lower() == requested:
+            return uploaded
+    return None
+
+
+def _reference_file_brief(path: Path, mime_type: str, max_chars: int = 2400) -> str:
+    suffix = path.suffix.lower()
+    size_bytes = path.stat().st_size if path.exists() else 0
+    parts = [
+        f"name={path.name}",
+        f"mime_type={mime_type or 'unknown'}",
+        f"size_bytes={size_bytes}",
+    ]
+
+    try:
+        if suffix in {".csv", ".tsv"}:
+            sep = "\t" if suffix == ".tsv" else ","
+            frame = pd.read_csv(path, sep=sep, nrows=8)
+            columns = ", ".join(str(column) for column in frame.columns[:30])
+            preview_rows = frame.head(5).to_dict(orient="records")
+            parts.append(f"columns={columns}")
+            parts.append(f"sample_rows={json.dumps(preview_rows, ensure_ascii=True)}")
+        elif suffix == ".json":
+            text = path.read_text(encoding="utf-8", errors="replace")
+            clipped = text[:max_chars]
+            parts.append(f"json_preview={clipped}")
+        else:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            clipped = text[:max_chars]
+            if clipped.strip():
+                parts.append(f"text_preview={clipped}")
+    except Exception as exc:
+        parts.append(f"preview_error={exc.__class__.__name__}")
+
+    return "\n".join(parts)
+
+
+def _extract_json_after_separator(raw_output: str) -> dict[str, Any] | None:
+    if not raw_output.strip():
+        return None
+
+    candidate = raw_output
+    if "=" * 20 in raw_output:
+        candidate = raw_output.split("=" * 20)[-1]
+
+    candidate = candidate.strip()
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for idx in range(len(candidate) - 1, -1, -1):
+        if candidate[idx] != "{":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(candidate[idx:])
+            if isinstance(parsed, dict) and end <= len(candidate[idx:]):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _resolve_downloaded_host_paths(downloaded_files: list[str], excluded_filenames: set[str] | None = None) -> list[Path]:
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    downloads_dir = _cua_downloads_dir()
+    excluded = {name.lower() for name in (excluded_filenames or set())}
+    for raw_path in downloaded_files:
+        filename = Path(str(raw_path)).name
+        if not filename:
+            continue
+        if filename.lower() in excluded:
+            continue
+        host_path = downloads_dir / filename
+        if host_path.exists() and host_path not in seen:
+            resolved.append(host_path)
+            seen.add(host_path)
+    return resolved
+
+
+def _fallback_match_review(reference_path: Path, candidate_paths: list[Path]) -> dict[str, Any]:
+    if not candidate_paths:
+        return {
+            "verdict": "mismatch",
+            "confidence": 0.15,
+            "best_candidate": "",
+            "reason": "No candidate files were downloaded.",
+            "retry_guidance": "Find an explicit download/export control and retry from the source page.",
+        }
+
+    ref_suffix = reference_path.suffix.lower()
+    best_candidate = candidate_paths[0]
+    best_score = 0.0
+    best_reason = ""
+
+    for candidate in candidate_paths:
+        score = 0.2
+        if candidate.suffix.lower() == ref_suffix:
+            score += 0.35
+
+        if ref_suffix in {".csv", ".tsv"} and candidate.suffix.lower() in {".csv", ".tsv"}:
+            try:
+                ref_sep = "\t" if ref_suffix == ".tsv" else ","
+                cand_sep = "\t" if candidate.suffix.lower() == ".tsv" else ","
+                ref_cols = set(pd.read_csv(reference_path, sep=ref_sep, nrows=1).columns.str.lower())
+                cand_cols = set(pd.read_csv(candidate, sep=cand_sep, nrows=1).columns.str.lower())
+                if ref_cols and cand_cols:
+                    overlap = len(ref_cols.intersection(cand_cols)) / max(len(ref_cols), 1)
+                    score += min(0.45, overlap)
+                    best_reason = f"Column overlap ratio={overlap:.2f}."
+            except Exception:
+                pass
+
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate
+
+    verdict = "match" if best_score >= 0.70 else ("unclear" if best_score >= 0.45 else "mismatch")
+    reason = best_reason or f"Heuristic score={best_score:.2f} for {best_candidate.name}."
+    return {
+        "verdict": verdict,
+        "confidence": clamp(best_score),
+        "best_candidate": best_candidate.name,
+        "reason": reason,
+        "retry_guidance": "Downloaded file does not look close enough; continue searching for a closer source export.",
+    }
+
+
+def _review_download_match_with_llm(
+    reference_path: Path,
+    candidate_paths: list[Path],
+    notes: str,
+) -> dict[str, Any]:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return _fallback_match_review(reference_path, candidate_paths)
+
+    reference_profile = _reference_file_brief(reference_path, "")
+    candidate_profiles: list[dict[str, str]] = []
+    for candidate in candidate_paths[:6]:
+        candidate_profiles.append(
+            {
+                "name": candidate.name,
+                "profile": _reference_file_brief(candidate, ""),
+            }
+        )
+
+    prompt = (
+        "You are reviewing downloaded source files against a submitted reference file.\n"
+        "Decide if any candidate is a close enough match to proceed.\n"
+        "Compare schema, entities/tickers, date ranges, granularity, and obvious semantic alignment.\n"
+        "If mismatch, provide concrete retry guidance for a browser automation agent.\n\n"
+        f"Reference profile:\n{reference_profile}\n\n"
+        f"Candidate profiles JSON:\n{json.dumps(candidate_profiles, ensure_ascii=True)}\n\n"
+    )
+    if notes.strip():
+        prompt += f"Additional context:\n{notes.strip()}\n\n"
+    prompt += (
+        "Return exactly one XML block with strict JSON:\n"
+        "<download_match>{\"verdict\":\"match|mismatch|unclear\",\"confidence\":0.0,"
+        "\"best_candidate\":\"filename-or-empty\",\"reason\":\"...\","
+        "\"retry_guidance\":\"...\"}</download_match>"
+    )
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=_gemini_model(),
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=500,
+            ),
+        )
+        raw_text = (getattr(response, "text", "") or "").strip()
+        parsed = extract_tagged_json(raw_text, "download_match")
+        if not parsed:
+            return _fallback_match_review(reference_path, candidate_paths)
+
+        verdict = str(parsed.get("verdict", "unclear")).strip().lower()
+        if verdict not in {"match", "mismatch", "unclear"}:
+            verdict = "unclear"
+        confidence = clamp(parsed.get("confidence", 0.5))
+        best_candidate = str(parsed.get("best_candidate", "")).strip()
+        reason = str(parsed.get("reason", "")).strip() or "LLM did not provide a reason."
+        retry_guidance = str(parsed.get("retry_guidance", "")).strip() or (
+            "Find a different source download that better matches schema/entities/date range."
+        )
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "best_candidate": best_candidate,
+            "reason": reason,
+            "retry_guidance": retry_guidance,
+        }
+    except Exception:
+        return _fallback_match_review(reference_path, candidate_paths)
+
+
+def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str = "") -> dict[str, Any]:
+    started = time.perf_counter()
+    file_entry = _find_uploaded_file(draft, file_to_validate)
+    if file_entry is None:
+        available = [entry.name for entry in draft.uploaded_files]
+        return {
+            "agent": "data_fetcher",
+            "status": "fail",
+            "confidence": 0.0,
+            "summary": "Requested file was not found among uploaded files.",
+            "flags": [
+                {
+                    "code": "REFERENCE_FILE_NOT_FOUND",
+                    "severity": "high",
+                    "message": f"Upload exists: {', '.join(available) if available else '(none)'}",
+                }
+            ],
+            "artifacts": {"requested_file": file_to_validate, "available_files": available},
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    if not draft.source_urls:
+        return {
+            "agent": "data_fetcher",
+            "status": "fail",
+            "confidence": 0.0,
+            "summary": "No source URLs were provided for CUA validation.",
+            "flags": [
+                {
+                    "code": "MISSING_SOURCE_URLS",
+                    "severity": "critical",
+                    "message": "Add at least one source URL before running /validate_data.",
+                }
+            ],
+            "artifacts": {"requested_file": file_to_validate},
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    source_path = Path(file_entry.path)
+    if not source_path.exists():
+        return {
+            "agent": "data_fetcher",
+            "status": "fail",
+            "confidence": 0.0,
+            "summary": "Uploaded reference file path is missing on disk.",
+            "flags": [
+                {
+                    "code": "REFERENCE_FILE_MISSING_ON_DISK",
+                    "severity": "high",
+                    "message": f"Missing file: {source_path}",
+                }
+            ],
+            "artifacts": {"requested_file": file_entry.name, "path": str(source_path)},
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    cua_downloads = _cua_downloads_dir()
+    cua_downloads.mkdir(parents=True, exist_ok=True)
+
+    staged_reference_name = f"reference_{draft.pitch_id}_{file_entry.name}"
+    staged_reference_path = cua_downloads / staged_reference_name
+    shutil.copy2(source_path, staged_reference_path)
+
+    max_attempts_raw = os.getenv("CUA_MAX_ATTEMPTS", "3")
+    try:
+        max_attempts = max(1, min(5, int(max_attempts_raw)))
+    except ValueError:
+        max_attempts = 3
+
+    timeout_raw = os.getenv("CUA_RUN_TIMEOUT_SECONDS", "360")
+    try:
+        run_timeout = max(60, int(timeout_raw))
+    except ValueError:
+        run_timeout = 360
+
+    source_list = "\n".join(f"- {url}" for url in draft.source_urls)
+    reference_brief = _reference_file_brief(source_path, file_entry.mime_type)
+
+    attempt_history: list[dict[str, Any]] = []
+    retry_feedback = ""
+    last_failure_output: dict[str, Any] | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        start_url = draft.source_urls[(attempt - 1) % len(draft.source_urls)]
+        description = (
+            "You are validating whether the submitted reference file matches publicly available source data.\n"
+            "First, inspect the local reference file in ~/Downloads using GUI actions.\n"
+            "Then navigate source pages and download candidate files, preferring browser GUI actions first.\n"
+            "If GUI is blocked or clearly inferior, you may use a script/terminal fallback.\n"
+            "After each download, compare against the reference and continue searching if mismatch.\n"
+            "Do not stop at the first file unless it is a strong match.\n\n"
+            f"Attempt: {attempt}/{max_attempts}\n"
+            f"Pitch ID: {draft.pitch_id}\n"
+            f"Reference filename: {staged_reference_name}\n"
+            f"Source URLs to check:\n{source_list}\n\n"
+            f"Reference file profile:\n{reference_brief}\n"
+        )
+        if notes.strip():
+            description += f"\nUser notes:\n{notes.strip()}\n"
+        if retry_feedback:
+            description += f"\nPrevious mismatch feedback:\n{retry_feedback}\n"
+
+        command = [
+            "docker",
+            "compose",
+            "run",
+            "--rm",
+            "--remove-orphans",
+            "data-fetcher",
+            start_url,
+            description,
+            staged_reference_name,
+        ]
+
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=_cua_dir(),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=run_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            last_failure_output = {
+                "agent": "data_fetcher",
+                "status": "fail",
+                "confidence": 0.0,
+                "summary": f"CUA run timed out after {run_timeout}s.",
+                "flags": [
+                    {
+                        "code": "CUA_RUN_TIMEOUT",
+                        "severity": "high",
+                        "message": f"Timeout after {run_timeout}s while running docker compose.",
+                    }
+                ],
+                "artifacts": {"attempt": attempt, "command": " ".join(command)},
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            }
+            break
+        except Exception as exc:
+            last_failure_output = {
+                "agent": "data_fetcher",
+                "status": "fail",
+                "confidence": 0.0,
+                "summary": "Failed to start CUA container process.",
+                "flags": [
+                    {
+                        "code": "CUA_RUN_ERROR",
+                        "severity": "high",
+                        "message": f"{exc.__class__.__name__} while invoking docker compose.",
+                    }
+                ],
+                "artifacts": {"attempt": attempt, "command": " ".join(command)},
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            }
+            break
+
+        parsed = _extract_json_after_separator((completed.stdout or "") + "\n" + (completed.stderr or ""))
+        if not parsed:
+            last_failure_output = {
+                "agent": "data_fetcher",
+                "status": "fail",
+                "confidence": 0.2,
+                "summary": "CUA run completed but returned unparsable output.",
+                "flags": [
+                    {
+                        "code": "CUA_OUTPUT_PARSE_FAILED",
+                        "severity": "high",
+                        "message": "Could not parse JSON result from CUA output.",
+                    }
+                ],
+                "artifacts": {
+                    "attempt": attempt,
+                    "return_code": completed.returncode,
+                    "stdout_tail": (completed.stdout or "")[-3000:],
+                    "stderr_tail": (completed.stderr or "")[-3000:],
+                },
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            }
+            continue
+
+        validation = parsed.get("validation", {}) if isinstance(parsed.get("validation"), dict) else {}
+        issues = validation.get("issues", []) if isinstance(validation.get("issues"), list) else []
+        flags: list[dict[str, str]] = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            code = str(issue.get("code", "CUA_ISSUE")).upper()
+            message = str(issue.get("message", "CUA reported an issue.")).strip()
+            severity = "low" if code == "GUI_ONLY_VIOLATION" else "medium"
+            if message:
+                flags.append({"code": code, "severity": severity, "message": message})
+
+        advisories = validation.get("advisories", []) if isinstance(validation.get("advisories"), list) else []
+        for advisory in advisories:
+            if not isinstance(advisory, dict):
+                continue
+            code = str(advisory.get("code", "CUA_ADVISORY")).strip().upper() or "CUA_ADVISORY"
+            message = str(advisory.get("message", "")).strip()
+            if message:
+                flags.append({"code": code, "severity": "low", "message": message})
+
+        downloaded = parsed.get("downloaded_files", []) if isinstance(parsed.get("downloaded_files"), list) else []
+        excluded_names = {staged_reference_name, source_path.name}
+        filtered_downloaded = [
+            file_path
+            for file_path in downloaded
+            if Path(str(file_path)).name.lower() not in {name.lower() for name in excluded_names}
+        ]
+        candidate_paths = _resolve_downloaded_host_paths(filtered_downloaded, excluded_filenames=excluded_names)
+        match_review = _review_download_match_with_llm(source_path, candidate_paths, notes)
+        match_verdict = str(match_review.get("verdict", "unclear")).lower()
+
+        if match_review.get("best_candidate", "").strip().lower() in {name.lower() for name in excluded_names}:
+            match_verdict = "mismatch"
+            match_review["verdict"] = "mismatch"
+            match_review["reason"] = "Staged reference file was selected as best candidate; this is not a valid source download."
+            match_review["retry_guidance"] = "Ignore the staged reference file and fetch a real source artifact from the target page."
+
+        if match_verdict == "mismatch":
+            flags.append(
+                {
+                    "code": "SOURCE_MISMATCH_SEVERE",
+                    "severity": "high",
+                    "message": str(match_review.get("reason", "Downloaded files did not match reference data.")).strip(),
+                }
+            )
+
+        status_text = str(parsed.get("status", "")).strip().lower()
+        status = "ok" if status_text == "success" and not flags and match_verdict == "match" else "warn"
+        if status_text == "fail":
+            status = "fail"
+        if any(flag["severity"] == "critical" for flag in flags):
+            status = "fail"
+        if match_verdict == "mismatch" and attempt >= max_attempts:
+            status = "fail"
+
+        confidence = clamp(match_review.get("confidence", 0.5))
+        if status == "warn":
+            confidence = min(confidence, 0.55)
+        elif status == "fail":
+            confidence = min(confidence, 0.25)
+
+        summary = str(parsed.get("summary", "")).strip() or "CUA run completed."
+        attempt_record = {
+            "attempt": attempt,
+            "start_url": start_url,
+            "status": status,
+            "match_review": match_review,
+            "downloaded_files": downloaded,
+            "candidate_downloaded_files": filtered_downloaded,
+        }
+        attempt_history.append(attempt_record)
+
+        result_payload = {
+            "agent": "data_fetcher",
+            "status": status,
+            "confidence": confidence,
+            "summary": summary,
+            "flags": flags,
+            "artifacts": {
+                "requested_file": file_entry.name,
+                "staged_reference": staged_reference_name,
+                "source_urls_checked": draft.source_urls,
+                "downloaded_files": downloaded,
+                "candidate_downloaded_files": filtered_downloaded,
+                "validation": validation,
+                "return_code": completed.returncode,
+                "match_rate": confidence if match_verdict == "match" else 0.35,
+                "match_review": match_review,
+                "attempt_history": attempt_history,
+            },
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+        if status == "ok":
+            return result_payload
+
+        retry_feedback = str(match_review.get("retry_guidance", "")).strip()
+        last_failure_output = result_payload
+
+    if last_failure_output:
+        artifacts = last_failure_output.get("artifacts", {})
+        if isinstance(artifacts, dict):
+            artifacts["attempt_history"] = attempt_history
+        return last_failure_output
+
+    return {
+        "agent": "data_fetcher",
+        "status": "fail",
+        "confidence": 0.0,
+        "summary": "CUA validation failed before any attempt could complete.",
+        "flags": [
+            {
+                "code": "CUA_UNKNOWN_ERROR",
+                "severity": "high",
+                "message": "Unknown CUA failure before attempt completion.",
+            }
+        ],
+        "artifacts": {
+            "requested_file": file_entry.name,
+            "staged_reference": staged_reference_name,
+            "attempt_history": attempt_history,
+        },
+        "latency_ms": int((time.perf_counter() - started) * 1000),
     }
 
 
@@ -544,6 +1098,24 @@ def _collect_validation_questions(
     return deduped[:4]
 
 
+def _validator_log(agent_name: str, message: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[validator:{agent_name}] {ts} | {message}")
+
+
+def _parse_validator_json(raw_text: str) -> dict[str, Any] | None:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
 def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -551,22 +1123,40 @@ def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, A
         raise RuntimeError("GEMINI_API_KEY is required for validator agents.")
 
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name=_gemini_model(),
-            system_instruction=system_prompt,
-        )
-        response = model.generate_content(
-            json.dumps(payload, ensure_ascii=True),
-            generation_config={
-                "temperature": 0.0,
-                "max_output_tokens": 900,
-            },
+        model_name = _gemini_model()
+        _validator_log(agent_name, f"start model={model_name}")
+        _validator_log(agent_name, f"payload_bytes={len(json.dumps(payload, ensure_ascii=True))}")
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=json.dumps(payload, ensure_ascii=True),
+            config=types.GenerateContentConfig(
+                temperature=1.0,
+                max_output_tokens=8192,
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=ValidatorResponseSchema,
+            ),
         )
         raw_text = (getattr(response, "text", "") or "").strip()
-        parsed = extract_tagged_json(raw_text, "validator_output")
-        if parsed is None:
-            raise ValueError("Missing or invalid validator_output JSON block")
+        _validator_log(agent_name, "raw_response_begin")
+        print(raw_text)
+        _validator_log(agent_name, "raw_response_end")
+
+        parsed_any = getattr(response, "parsed", None)
+        if parsed_any is None:
+            parsed_dict = _parse_validator_json(raw_text)
+            if parsed_dict is None:
+                _validator_log(agent_name, "parse_failed: invalid JSON response")
+                raise ValueError("Invalid JSON response from validator model")
+            parsed_model = ValidatorResponseSchema.model_validate(parsed_dict)
+        elif isinstance(parsed_any, ValidatorResponseSchema):
+            parsed_model = parsed_any
+        elif isinstance(parsed_any, dict):
+            parsed_model = ValidatorResponseSchema.model_validate(parsed_any)
+        else:
+            parsed_model = ValidatorResponseSchema.model_validate(getattr(parsed_any, "model_dump", lambda: {})())
+        parsed = parsed_model.model_dump()
 
         flags = _normalize_flags(parsed.get("flags"))
         confidence = clamp(parsed.get("confidence", 0.5))
@@ -584,10 +1174,14 @@ def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, A
             "latency_ms": int((time.perf_counter() - started) * 1000),
         }
     except Exception as exc:
+        _validator_log(agent_name, f"exception={exc.__class__.__name__}: {exc}")
+        _validator_log(agent_name, "traceback_begin")
+        print(traceback.format_exc())
+        _validator_log(agent_name, "traceback_end")
         return {
             "status": "warn",
             "confidence": 0.2,
-            "summary": f"{agent_name} failed; falling back to non-LLM checks.",
+            "summary": f"{agent_name} failed during LLM validation.",
             "flags": [
                 {
                     "code": "LLM_VALIDATOR_ERROR",
@@ -595,13 +1189,14 @@ def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, A
                     "message": f"{exc.__class__.__name__} while running LLM validator.",
                 }
             ],
-            "artifacts": {"verdict": "unclear", "questions": [], "checklist_findings": []},
+            "artifacts": {"verdict": "unclear", "questions": []},
             "latency_ms": int((time.perf_counter() - started) * 1000),
         }
 
 
 def _run_llm_validators(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    max_workers = 1 if os.getenv("VALIDATOR_SERIAL_MODE", "1") == "1" else 2
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         fabrication_future = executor.submit(
             _run_llm_validator,
             "fabrication_detector",
@@ -639,7 +1234,7 @@ class EvaluationResult:
         return asdict(self)
 
 
-def evaluate_pitch(draft: PitchDraft) -> EvaluationResult:
+def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None = None) -> EvaluationResult:
     frame, load_errors = _load_first_table(draft.uploaded_files)
     method_score, methodology_warnings = _methodology_score(draft.methodology_summary)
 
@@ -745,21 +1340,27 @@ def evaluate_pitch(draft: PitchDraft) -> EvaluationResult:
         duplicate_fraction = float(frame.duplicated().mean()) if frame.shape[0] > 0 else 0.0
         data_quality_score = clamp(1.0 - missing_fraction - (0.5 * duplicate_fraction))
 
-    fetcher_flags.append(
-        {
-            "code": "CUA_NOT_CONNECTED",
-            "severity": "low",
-            "message": "CUA fetch run is not yet wired from Chainlit; using placeholder match score.",
-        }
-    )
-
     for warning in methodology_warnings:
         auditor_flags.append({"code": "METHOD_WARN", "severity": "medium", "message": warning})
 
     sharpe_n = clamp((sharpe + 1.0) / 3.0)
     drawdown_n = 1.0 - clamp(abs(max_drawdown) / 0.60)
     risk_n = 1.0 - risk_score
-    match_rate = _match_rate(draft)
+    if data_fetcher_output:
+        fetcher_flags.extend(_normalize_flags(data_fetcher_output.get("flags")))
+        artifacts = data_fetcher_output.get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+        match_rate = clamp(artifacts.get("match_rate", _match_rate(draft)))
+    else:
+        fetcher_flags.append(
+            {
+                "code": "CUA_NOT_CONNECTED",
+                "severity": "low",
+                "message": "CUA validation was not run for this evaluation.",
+            }
+        )
+        match_rate = _match_rate(draft)
 
     validator_payload = _build_validator_payload(
         draft=draft,
@@ -792,8 +1393,8 @@ def evaluate_pitch(draft: PitchDraft) -> EvaluationResult:
         hard_reject_reasons.append("Critical validation issues detected.")
 
     fabrication_verdict = str(fabrication_result.get("artifacts", {}).get("verdict", "unclear")).strip().lower()
-    fabrication_has_critical = any(flag.get("severity") == "critical" for flag in fabrication_result["flags"])
-    is_fabrication_blocked = fabrication_has_critical or fabrication_verdict == "fabrication"
+    fabrication_confidence = float(fabrication_result.get("confidence", 0.0))
+    is_fabrication_blocked = fabrication_verdict == "fabrication" and fabrication_confidence >= 0.8
 
     validation_summary = _summarize_flags([fabrication_result["flags"], coding_errors_result["flags"], fetcher_flags])
     validation_questions = _collect_validation_questions(
@@ -803,8 +1404,11 @@ def evaluate_pitch(draft: PitchDraft) -> EvaluationResult:
         coding_artifacts=coding_errors_result.get("artifacts", {}),
     )
 
-    has_actionable_issue = any(
-        flag.get("severity") in {"medium", "high", "critical"} for flag in (fetcher_flags + validator_flags + auditor_flags)
+    coding_verdict = str(coding_errors_result.get("artifacts", {}).get("verdict", "clean")).strip().lower()
+    has_actionable_issue = (
+        coding_verdict == "errors_found"
+        or any(flag.get("severity") in {"medium", "high", "critical"} for flag in (fetcher_flags + auditor_flags))
+        or (fabrication_verdict == "unclear" and fabrication_confidence >= 0.7)
     )
     if is_fabrication_blocked:
         validation_outcome = VALIDATION_OUTCOME_BLOCKED
@@ -826,15 +1430,29 @@ def evaluate_pitch(draft: PitchDraft) -> EvaluationResult:
     validator_status = "fail" if any(flag["severity"] == "critical" for flag in validator_flags) else "ok"
     auditor_status = "fail" if any(flag["severity"] == "critical" for flag in auditor_flags) else "warn"
 
+    fetcher_summary = "CUA integration placeholder from Chainlit intake."
+    fetcher_confidence = 0.45
+    fetcher_latency = 0
+    fetcher_artifacts: dict[str, Any] = {"match_rate": match_rate, "load_errors": load_errors}
+
+    if data_fetcher_output:
+        fetcher_status = str(data_fetcher_output.get("status", fetcher_status))
+        fetcher_summary = str(data_fetcher_output.get("summary", fetcher_summary))
+        fetcher_confidence = clamp(float(data_fetcher_output.get("confidence", fetcher_confidence)))
+        fetcher_latency = int(data_fetcher_output.get("latency_ms", 0) or 0)
+        maybe_artifacts = data_fetcher_output.get("artifacts")
+        if isinstance(maybe_artifacts, dict):
+            fetcher_artifacts = maybe_artifacts
+
     agent_outputs = {
         "data_fetcher": {
             "agent": "data_fetcher",
             "status": fetcher_status,
-            "confidence": 0.45,
-            "summary": "CUA integration placeholder from Chainlit intake.",
+            "confidence": fetcher_confidence,
+            "summary": fetcher_summary,
             "flags": fetcher_flags,
-            "artifacts": {"match_rate": match_rate, "load_errors": load_errors},
-            "latency_ms": 0,
+            "artifacts": fetcher_artifacts,
+            "latency_ms": fetcher_latency,
         },
         "data_validator": {
             "agent": "data_validator",

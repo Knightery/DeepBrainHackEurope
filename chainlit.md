@@ -13,6 +13,7 @@ Commands:
 - `/status` check readiness
 - `/checklist` show onboarding checklist
 - `/evaluate` run v0 score + allocation
+- `/validate_data "file_to_validate" "notes"` run CUA file-vs-source validation
 - `/reset` start over
 
 To upload files, use the attachment button in the chat input.

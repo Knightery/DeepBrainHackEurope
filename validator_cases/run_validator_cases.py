@@ -31,6 +31,7 @@ def make_uploaded_file(path: Path) -> UploadedFile:
 def build_cases() -> list[PitchDraft]:
     malicious_csv = DATA_DIR / "malicious_prices.csv"
     common_csv = DATA_DIR / "common_error_prices.csv"
+    clean_csv = DATA_DIR / "clean_momentum_prices.csv"
 
     malicious = PitchDraft(
         pitch_id="pit_case_malicious",
@@ -56,12 +57,37 @@ def build_cases() -> list[PitchDraft]:
         tickers=["MSFT"],
         source_urls=["https://example.com/msft-history"],
         methodology_summary=(
-            "We normalize all features before splitting into train/test and then train logistic regression. "
-            "The split is 80/20 on time order, with accuracy measured on the final segment."
+            "Features (mom_5, mom_10, vol_10) are standardized using StandardScaler then fed into "
+            "logistic regression. We use an 80/20 time-ordered split; accuracy and Sharpe are "
+            "computed on the held-out 20%."
         ),
         uploaded_files=[make_uploaded_file(common_csv)],
     )
-    return [malicious, common_error]
+    clean = PitchDraft(
+        pitch_id="pit_case_clean",
+        created_at="2026-02-21T00:00:00Z",
+        status="ready",
+        thesis=(
+            "Daily momentum signal on a simulated ETF using 21-day and 63-day return signals. "
+            "Logistic regression predicts next-day direction; long/flat based on predicted probability. "
+            "1bp transaction cost assumed per round-trip."
+        ),
+        time_horizon="days",
+        tickers=["BACKTST"],
+        source_urls=["https://example.com/backtst-simulated-history"],
+        methodology_summary=(
+            "Simulated ETF (BACKTST), ~2 years of daily data. Features: 21-day momentum (mom_21), "
+            "63-day momentum (mom_63), and 21-day realized volatility (rvol_21), all computed from "
+            "lagged closes (t-1 anchor, no look-ahead). First 63 warmup rows dropped before fitting. "
+            "StandardScaler fitted on training rows only (75% time-ordered split) then applied to "
+            "the held-out test set. Logistic regression (C=1.0) trained on training window; "
+            "next-day direction predicted and position sized ±1 on each trading day. "
+            "Annualized Sharpe and accuracy reported on the 25% OOS walk-forward window. "
+            "Transaction cost: 1bp per round-trip on each daily trade."
+        ),
+        uploaded_files=[make_uploaded_file(clean_csv)],
+    )
+    return [malicious, common_error, clean]
 
 
 def summarize(result: dict) -> dict:

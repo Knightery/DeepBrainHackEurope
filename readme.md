@@ -76,7 +76,7 @@ Use Docker Compose from inside `cua/`:
 ```powershell
 cd cua
 docker compose build
-docker compose run --rm --remove-orphans data-fetcher "https://www.netflix.com/tudum/top10" "Fetch global top 10 lists from download tab" "NetflixTop10.xlsx"
+docker compose run --rm --remove-orphans data-fetcher "https://www.netflix.com/tudum/top10" "Validate downloaded data against reference file" "reference_user_file.csv"
 ```
 
 Watch the live desktop at `http://localhost:6080`.
@@ -89,13 +89,12 @@ Model selection:
 
 CUA fetch behavior:
 
-- The agent is now GUI-only in `cua/data_fetcher.py`: it must navigate and click in-browser controls.
-- Bash/terminal/script workarounds (`bash`, `curl`, `wget`, inline Python) are treated as a run violation.
-- Success is strict: a new downloaded file must appear in `~/Downloads` and match allowed data extensions.
-- If an `expected_filename` is provided (3rd CLI arg), the run fails unless that exact filename is downloaded.
-- Default allowed extensions: `.csv,.tsv,.xlsx,.xls,.json,.zip`.
-- Default disallowed extensions: `.html,.htm`.
-- Optional overrides: `CUA_ALLOWED_EXTENSIONS` and `CUA_DISALLOWED_EXTENSIONS` (comma-separated).
+- The agent is CUA-first in `cua/data_fetcher.py`: it is strongly encouraged to navigate and click in-browser controls.
+- Bash/terminal/script fallback (`bash`, `curl`, `wget`, inline Python) is allowed when it is the best practical path.
+- The 3rd CLI arg is a reference filename already present in `~/Downloads`; CUA inspects it first, then searches source pages.
+- Artifact checks are dynamic (no hardcoded filename/type requirement); matching quality is decided from CUA reasoning + downstream validators.
+- After each CUA run, the main agent performs an LLM match review between reference and downloaded candidates.
+- If mismatch is detected, the system automatically re-runs CUA with corrective guidance (configurable by `CUA_MAX_ATTEMPTS`, default `3`).
 
 Important: `docker run build` is not a valid build command. Use `docker compose build` (or `docker build`).
 
@@ -104,3 +103,31 @@ Important: `docker run build` is not a valid build command. Use `docker compose 
 - Keep user inputs minimal but meaningful.
 - Keep scoring deterministic in MVP.
 - Prefer clarity and auditability over complexity.
+
+## Test scripts
+
+Validation test cases:
+
+```powershell
+python validator_cases/run_validator_cases.py
+```
+
+CUA Netflix fetch test (GUI flow with context "click the download button"):
+
+```powershell
+python validator_cases/run_cua_tests.py
+```
+
+Basic direct CUA smoke test (Anthropic path only, bypasses `pitch_engine` matching):
+
+```powershell
+python validator_cases/run_cua_basic_test.py
+```
+
+Optional env overrides for CUA test:
+
+- `CUA_TEST_REFERENCE_FILE` (defaults to `2026-02-21_country_weekly.tsv` in repo root)
+- `CUA_TEST_NOTES` (defaults to `click the download button`)
+- `CUA_BASIC_TEST_URL` (defaults to `https://www.netflix.com/tudum/top10`)
+- `CUA_BASIC_TEST_NOTES` (defaults to `click the download button`)
+- `CUA_BASIC_TEST_TIMEOUT_SECONDS` (defaults to `240`)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -9,7 +10,8 @@ from typing import Any
 
 import chainlit as cl
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from pitch_engine import (
     PitchDraft,
@@ -19,6 +21,7 @@ from pitch_engine import (
     file_sha256,
     heuristic_update_from_user_text,
     strip_tagged_json,
+    validate_data_with_cua,
 )
 
 load_dotenv()
@@ -50,6 +53,7 @@ Commands:
 - `/checklist` show onboarding checklist
 - `/evaluate` run validation and scoring
 - `/validate` re-run the validation loop after clarifications
+- `/validate_data "file_to_validate" "notes"` run CUA data-source validation for one uploaded file
 - `/reset` start a new pitch
 - `/help` show commands
 """.strip()
@@ -65,17 +69,13 @@ def _gemini_model() -> str:
     return os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 
-def _get_client() -> genai.GenerativeModel | None:
+def _get_client() -> genai.Client | None:
     import os
 
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(
-        model_name=_gemini_model(),
-        system_instruction=SYSTEM_PROMPT,
-    )
+    return genai.Client(api_key=api_key)
 
 
 def _pitch_dir(pitch_id: str) -> Path:
@@ -144,6 +144,15 @@ def _session_validation_context() -> list[str]:
 
 def _set_session_validation_context(items: list[str]) -> None:
     cl.user_session.set("validation_context", items[-3:])
+
+
+def _session_data_fetcher_output() -> dict[str, Any] | None:
+    output = cl.user_session.get("data_fetcher_output")
+    return output if isinstance(output, dict) else None
+
+
+def _set_session_data_fetcher_output(output: dict[str, Any] | None) -> None:
+    cl.user_session.set("data_fetcher_output", output)
 
 
 def _apply_clarification_update(draft: PitchDraft, user_text: str) -> None:
@@ -232,12 +241,14 @@ async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> str:
     )
 
     try:
-        response = await cl.make_async(client.generate_content)(
-            prompt,
-            generation_config={
-                "temperature": 0.2,
-                "max_output_tokens": 700,
-            },
+        response = await cl.make_async(client.models.generate_content)(
+            model=_gemini_model(),
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=700,
+                system_instruction=SYSTEM_PROMPT,
+            ),
         )
         raw_text = (getattr(response, "text", "") or "").strip()
         extracted = extract_tagged_json(raw_text, "pitch_state")
@@ -321,7 +332,7 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
     _append_chat_event(draft, "system", "Evaluation started.")
 
     try:
-        result = evaluate_pitch(draft)
+        result = evaluate_pitch(draft, data_fetcher_output=_session_data_fetcher_output())
     except Exception as exc:
         draft.status = "failed"
         _save_pitch_snapshot(draft)
@@ -364,6 +375,60 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
     await cl.Message(content=result.report_markdown).send()
 
 
+def _parse_validate_data_command(content: str) -> tuple[str | None, str | None, str | None]:
+    try:
+        parts = shlex.split(content)
+    except ValueError as exc:
+        return None, None, f"Could not parse command arguments: {exc}"
+
+    if len(parts) < 2:
+        return None, None, "Usage: /validate_data \"file_to_validate\" \"notes\""
+
+    file_name = parts[1].strip()
+    notes = " ".join(parts[2:]).strip()
+    if not file_name:
+        return None, None, "File name cannot be empty."
+    return file_name, notes, None
+
+
+async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None:
+    file_name, notes, error = _parse_validate_data_command(content)
+    if error:
+        await cl.Message(content=error).send()
+        return
+
+    await cl.Message(content=f"Starting CUA validation for `{file_name}`. This can take a few minutes.").send()
+    output = await cl.make_async(validate_data_with_cua)(draft, file_name or "", notes or "")
+    _set_session_data_fetcher_output(output)
+
+    output_path = _pitch_dir(draft.pitch_id) / "agent_outputs" / "data_fetcher.json"
+    _write_json(output_path, output)
+    _append_chat_event(
+        draft,
+        "system",
+        f"/validate_data file={file_name} status={output.get('status', 'unknown')}",
+    )
+
+    flags = output.get("flags", []) if isinstance(output.get("flags"), list) else []
+    if flags:
+        flag_lines = "\n".join(
+            f"- `{flag.get('severity', 'medium')}` `{flag.get('code', 'CUA_ISSUE')}`: {flag.get('message', '')}"
+            for flag in flags[:6]
+        )
+    else:
+        flag_lines = "- none"
+
+    await cl.Message(
+        content=(
+            "## CUA Data Validation\n"
+            f"- Status: `{output.get('status', 'unknown')}`\n"
+            f"- Summary: {output.get('summary', '') or 'CUA run completed.'}\n"
+            f"- Flags:\n{flag_lines}\n\n"
+            "Run `/evaluate` to include this CUA result in the full decision pipeline."
+        )
+    ).send()
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -371,6 +436,7 @@ async def on_chat_start() -> None:
     _set_session_draft(draft)
     _set_session_history([])
     _set_session_validation_context([])
+    _set_session_data_fetcher_output(None)
     _save_pitch_snapshot(draft)
 
     greeting = (
@@ -417,11 +483,15 @@ async def on_message(message: cl.Message) -> None:
         if command == "/validate":
             await _handle_evaluate_command(draft, "/validate")
             return
+        if command == "/validate_data":
+            await _handle_validate_data_command(draft, content)
+            return
         if command == "/reset":
             new_draft = _new_pitch()
             _set_session_draft(new_draft)
             _set_session_history([])
             _set_session_validation_context([])
+            _set_session_data_fetcher_output(None)
             _save_pitch_snapshot(new_draft)
             await cl.Message(content=f"Started a new pitch: `{new_draft.pitch_id}`").send()
             return
