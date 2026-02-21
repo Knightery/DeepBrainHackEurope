@@ -30,9 +30,16 @@ try:
 except ImportError:
     _BACKTEST_AGENT_AVAILABLE = False
 
-REQUIRED_FIELDS = ("thesis", "time_horizon", "methodology_summary")
+try:
+    from one_shot_validator import evaluate_one_shot_strategy
+    _ONE_SHOT_VALIDATOR_AVAILABLE = True
+except ImportError:
+    _ONE_SHOT_VALIDATOR_AVAILABLE = False
+
+REQUIRED_FIELDS = ("thesis", "time_horizon")
 TIME_HORIZON_VALUES = {"days", "weeks", "months", "years"}
-SEVERITY_LEVELS = {"low", "medium", "high", "critical"}
+BACKTEST_NOTEBOOK_MAX_SCRIPT_CHARS = int(os.getenv("BACKTEST_NOTEBOOK_MAX_SCRIPT_CHARS", "180000"))
+BACKTEST_NOTEBOOK_MAX_CODE_CELLS = int(os.getenv("BACKTEST_NOTEBOOK_MAX_CODE_CELLS", "400"))
 
 
 def _gemini_model() -> str:
@@ -63,7 +70,7 @@ Fabrication checklist:
 4) Data that provably does not match the declared source (e.g. ticker mismatch, wrong price range for period)
 
 Output — strict JSON only:
-{"summary":"...","confidence":0.0,"flags":[{"code":"...","severity":"low|medium|high|critical","message":"..."}],"artifacts":{"verdict":"clean|fabrication|unclear","questions":[]}}
+{"summary":"...","confidence":0.0,"flags":[{"code":"...","message":"..."}],"artifacts":{"verdict":"clean|fabrication|unclear","questions":[]}}
 """.strip()
 
 CODING_ERRORS_VALIDATOR_PROMPT = """
@@ -85,12 +92,11 @@ Methodology checklist:
 6) Unrealistic assumptions — no transaction costs / slippage for high-frequency or daily rebalancing strategies
 
 Output — strict JSON only:
-{"summary":"...","confidence":0.0,"flags":[{"code":"...","severity":"low|medium|high|critical","message":"..."}],"artifacts":{"verdict":"clean|errors_found","questions":[]}}
+{"summary":"...","confidence":0.0,"flags":[{"code":"...","message":"..."}],"artifacts":{"verdict":"clean|errors_found","questions":[]}}
 """.strip()
 
 class ValidatorFlagSchema(BaseModel):
     code: str
-    severity: str
     message: str
 
 
@@ -243,6 +249,7 @@ class PitchDraft:
     tickers: list[str] = field(default_factory=list)
     source_urls: list[str] = field(default_factory=list)
     methodology_summary: str = ""
+    one_shot_mode: bool = False
     submitter: dict[str, Any] = field(default_factory=dict)
     uploaded_files: list[UploadedFile] = field(default_factory=list)
 
@@ -256,6 +263,8 @@ class PitchDraft:
             missing.append("tickers")
         if not self.source_urls:
             missing.append("source_urls")
+        if not self.uploaded_files:
+            missing.append("uploaded_files")
         return missing
 
     def ready_for_evaluation(self) -> bool:
@@ -275,6 +284,7 @@ class PitchDraft:
             "tickers": self.tickers,
             "source_urls": self.source_urls,
             "methodology_summary": self.methodology_summary,
+            "one_shot_mode": self.one_shot_mode,
             "uploaded_file_names": [entry.name for entry in self.uploaded_files],
             "missing_fields": self.missing_fields(),
             "ready_for_evaluation": self.ready_for_evaluation(),
@@ -414,7 +424,7 @@ def _detect_file_roles(uploaded_files: list[UploadedFile]) -> dict[str, list[Upl
 
     Returns:
         {
-            "strategy_scripts": [.py files],
+            "strategy_scripts": [.py/.ipynb files],
             "data_files":        [.csv/.tsv non-benchmark files],
             "benchmark_files":   [.csv/.tsv with 'benchmark'/'market'/etc in name],
         }
@@ -427,7 +437,7 @@ def _detect_file_roles(uploaded_files: list[UploadedFile]) -> dict[str, list[Upl
         suffix = Path(f.path).suffix.lower()
         name_lower = f.name.lower()
 
-        if suffix == ".py":
+        if suffix in {".py", ".ipynb"}:
             strategy_scripts.append(f)
         elif suffix in {".csv", ".tsv"}:
             if any(kw in name_lower for kw in ("benchmark", "market", "index", "spy", "bm_")):
@@ -440,6 +450,80 @@ def _detect_file_roles(uploaded_files: list[UploadedFile]) -> dict[str, list[Upl
         "data_files": data_files,
         "benchmark_files": benchmark_files,
     }
+
+
+def _sanitize_notebook_code_line(line: str) -> str:
+    stripped = line.lstrip()
+    # Jupyter magics and shell escapes are not valid plain-Python syntax.
+    if stripped.startswith("%") or stripped.startswith("!"):
+        return f"# {line}"
+    if stripped.startswith("get_ipython("):
+        return f"# {line}"
+    return line
+
+
+def _compile_notebook_to_script(notebook_text: str, notebook_name: str) -> str:
+    try:
+        notebook_obj = json.loads(notebook_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Notebook JSON is invalid: {exc}") from exc
+
+    cells = notebook_obj.get("cells")
+    if not isinstance(cells, list):
+        raise ValueError("Notebook does not contain a valid 'cells' list.")
+
+    compiled_chunks = [
+        f"# Compiled from notebook: {notebook_name}",
+        "# Executed as a linear Python script for MVP backtesting.",
+    ]
+    code_cells = 0
+
+    for idx, cell in enumerate(cells):
+        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+            continue
+        source = cell.get("source", "")
+        if isinstance(source, list):
+            source = "".join(source)
+        source = str(source)
+        if not source.strip():
+            continue
+
+        sanitized = "\n".join(_sanitize_notebook_code_line(line) for line in source.splitlines())
+        code_cells += 1
+        compiled_chunks.append(f"\n# --- notebook cell {idx} ---\n{sanitized}\n")
+
+        if code_cells > BACKTEST_NOTEBOOK_MAX_CODE_CELLS:
+            raise ValueError(
+                f"Notebook has more than {BACKTEST_NOTEBOOK_MAX_CODE_CELLS} code cells; "
+                "please trim it before upload."
+            )
+
+    if code_cells == 0:
+        raise ValueError("Notebook has no executable code cells.")
+
+    compiled_script = "\n".join(compiled_chunks)
+    if len(compiled_script) > BACKTEST_NOTEBOOK_MAX_SCRIPT_CHARS:
+        raise ValueError(
+            f"Compiled notebook script exceeds {BACKTEST_NOTEBOOK_MAX_SCRIPT_CHARS} characters; "
+            "please upload a smaller notebook or convert it to a focused strategy .py."
+        )
+
+    return compiled_script
+
+
+def _load_strategy_source_for_backtest(file_entry: UploadedFile) -> tuple[str, str]:
+    path = Path(file_entry.path)
+    suffix = path.suffix.lower()
+    raw_text = path.read_text(encoding="utf-8", errors="replace")
+
+    if suffix == ".py":
+        return file_entry.name, raw_text
+    if suffix == ".ipynb":
+        compiled_name = f"{Path(file_entry.name).stem}_compiled.py"
+        compiled_script = _compile_notebook_to_script(raw_text, file_entry.name)
+        return compiled_name, compiled_script
+
+    raise ValueError(f"Unsupported strategy file type: '{suffix}'")
 
 
 def _compute_allocation(score: float, horizon: str | None) -> int:
@@ -738,7 +822,12 @@ def _review_download_match_with_llm(
         return _fallback_match_review(reference_path, candidate_paths)
 
 
-def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str = "") -> dict[str, Any]:
+def validate_data_with_cua(
+    draft: PitchDraft,
+    file_to_validate: str,
+    notes: str = "",
+    source_urls_override: list[str] | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
     file_entry = _find_uploaded_file(draft, file_to_validate)
     if file_entry is None:
@@ -751,7 +840,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
             "flags": [
                 {
                     "code": "REFERENCE_FILE_NOT_FOUND",
-                    "severity": "high",
                     "message": f"Upload exists: {', '.join(available) if available else '(none)'}",
                 }
             ],
@@ -759,7 +847,9 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
             "latency_ms": int((time.perf_counter() - started) * 1000),
         }
 
-    if not draft.source_urls:
+    selected_source_urls = [url.strip() for url in (source_urls_override or draft.source_urls) if str(url).strip()]
+
+    if not selected_source_urls:
         return {
             "agent": "data_fetcher",
             "status": "fail",
@@ -768,7 +858,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
             "flags": [
                 {
                     "code": "MISSING_SOURCE_URLS",
-                    "severity": "critical",
                     "message": "Add at least one source URL before running /validate_data.",
                 }
             ],
@@ -786,7 +875,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
             "flags": [
                 {
                     "code": "REFERENCE_FILE_MISSING_ON_DISK",
-                    "severity": "high",
                     "message": f"Missing file: {source_path}",
                 }
             ],
@@ -813,7 +901,7 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
     except ValueError:
         run_timeout = 360
 
-    source_list = "\n".join(f"- {url}" for url in draft.source_urls)
+    source_list = "\n".join(f"- {url}" for url in selected_source_urls)
     reference_brief = _reference_file_brief(source_path, file_entry.mime_type)
 
     attempt_history: list[dict[str, Any]] = []
@@ -821,7 +909,7 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
     last_failure_output: dict[str, Any] | None = None
 
     for attempt in range(1, max_attempts + 1):
-        start_url = draft.source_urls[(attempt - 1) % len(draft.source_urls)]
+        start_url = selected_source_urls[(attempt - 1) % len(selected_source_urls)]
         description = (
             "You are validating whether the submitted reference file matches publicly available source data.\n"
             "First, inspect the local reference file in ~/Downloads using GUI actions.\n"
@@ -870,7 +958,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
                 "flags": [
                     {
                         "code": "CUA_RUN_TIMEOUT",
-                        "severity": "high",
                         "message": f"Timeout after {run_timeout}s while running docker compose.",
                     }
                 ],
@@ -887,7 +974,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
                 "flags": [
                     {
                         "code": "CUA_RUN_ERROR",
-                        "severity": "high",
                         "message": f"{exc.__class__.__name__} while invoking docker compose.",
                     }
                 ],
@@ -906,7 +992,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
                 "flags": [
                     {
                         "code": "CUA_OUTPUT_PARSE_FAILED",
-                        "severity": "high",
                         "message": "Could not parse JSON result from CUA output.",
                     }
                 ],
@@ -928,9 +1013,8 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
                 continue
             code = str(issue.get("code", "CUA_ISSUE")).upper()
             message = str(issue.get("message", "CUA reported an issue.")).strip()
-            severity = "low" if code == "GUI_ONLY_VIOLATION" else "medium"
             if message:
-                flags.append({"code": code, "severity": severity, "message": message})
+                flags.append({"code": code, "message": message})
 
         advisories = validation.get("advisories", []) if isinstance(validation.get("advisories"), list) else []
         for advisory in advisories:
@@ -939,7 +1023,7 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
             code = str(advisory.get("code", "CUA_ADVISORY")).strip().upper() or "CUA_ADVISORY"
             message = str(advisory.get("message", "")).strip()
             if message:
-                flags.append({"code": code, "severity": "low", "message": message})
+                flags.append({"code": code, "message": message})
 
         downloaded = parsed.get("downloaded_files", []) if isinstance(parsed.get("downloaded_files"), list) else []
         excluded_names = {staged_reference_name, source_path.name}
@@ -962,7 +1046,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
             flags.append(
                 {
                     "code": "SOURCE_MISMATCH_SEVERE",
-                    "severity": "high",
                     "message": str(match_review.get("reason", "Downloaded files did not match reference data.")).strip(),
                 }
             )
@@ -970,8 +1053,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
         status_text = str(parsed.get("status", "")).strip().lower()
         status = "ok" if status_text == "success" and not flags and match_verdict == "match" else "warn"
         if status_text == "fail":
-            status = "fail"
-        if any(flag["severity"] == "critical" for flag in flags):
             status = "fail"
         if match_verdict == "mismatch" and attempt >= max_attempts:
             status = "fail"
@@ -1002,7 +1083,7 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
             "artifacts": {
                 "requested_file": file_entry.name,
                 "staged_reference": staged_reference_name,
-                "source_urls_checked": draft.source_urls,
+                "source_urls_checked": selected_source_urls,
                 "downloaded_files": downloaded,
                 "candidate_downloaded_files": filtered_downloaded,
                 "validation": validation,
@@ -1034,7 +1115,6 @@ def validate_data_with_cua(draft: PitchDraft, file_to_validate: str, notes: str 
         "flags": [
             {
                 "code": "CUA_UNKNOWN_ERROR",
-                "severity": "high",
                 "message": "Unknown CUA failure before attempt completion.",
             }
         ],
@@ -1070,23 +1150,15 @@ def _normalize_flags(flags: Any) -> list[dict[str, str]]:
         if not isinstance(raw_flag, dict):
             continue
         code = str(raw_flag.get("code", "")).strip().upper() or "UNSPECIFIED"
-        severity = str(raw_flag.get("severity", "medium")).strip().lower()
         message = str(raw_flag.get("message", "")).strip()
-        if severity not in SEVERITY_LEVELS:
-            severity = "medium"
         if not message:
             continue
-        normalized.append({"code": code, "severity": severity, "message": message})
+        normalized.append({"code": code, "message": message})
     return normalized
 
 
 def _status_from_flags(flags: list[dict[str, str]]) -> str:
-    severities = {flag["severity"] for flag in flags}
-    if "critical" in severities:
-        return "fail"
-    if "high" in severities or "medium" in severities:
-        return "warn"
-    return "ok"
+    return "warn" if flags else "ok"
 
 
 def _summarize_flags(flag_groups: list[list[dict[str, str]]], limit: int = 4) -> str:
@@ -1136,8 +1208,7 @@ def _collect_validation_questions(
         generated = _question_from_flag(flag)
         if generated:
             questions.append(generated)
-    deduped = list(dict.fromkeys(questions))
-    return deduped[:4]
+    return list(dict.fromkeys(questions))
 
 
 def _validator_log(agent_name: str, message: str) -> None:
@@ -1227,7 +1298,6 @@ def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, A
             "flags": [
                 {
                     "code": "LLM_VALIDATOR_ERROR",
-                    "severity": "high",
                     "message": f"{exc.__class__.__name__} while running LLM validator.",
                 }
             ],
@@ -1284,11 +1354,12 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     validator_flags: list[dict[str, str]] = []
     auditor_flags: list[dict[str, str]] = []
     fetcher_flags: list[dict[str, str]] = []
+    one_shot_result: Any = None
 
     # --- Backtest agent ---
-    # When the user uploads a strategy .py, Claude generates and runs a standardised
+    # When the user uploads a strategy .py/.ipynb, Claude generates and runs a standardised
     # backtest runner that computes all strategy_scorer.Strategy metrics.
-    # Falls back to CSV-based scoring when no .py is present or agent cannot complete.
+    # Falls back to CSV-based scoring when no strategy file is present or agent cannot complete.
     backtest_result: Any = None
     backtest_scored: Any = None
     roles = _detect_file_roles(draft.uploaded_files)
@@ -1296,52 +1367,75 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         _strat_files: list[tuple[str, str]] = []
         for _f in roles["strategy_scripts"]:
             try:
-                _strat_files.append((_f.name, Path(_f.path).read_text(encoding="utf-8", errors="replace")))
-            except Exception:
-                pass
+                _strat_files.append(_load_strategy_source_for_backtest(_f))
+            except ValueError as _compile_err:
+                auditor_flags.append({
+                    "code": "BACKTEST_STRATEGY_PREP_ERROR",
+                    "message": f"Could not prepare strategy file '{_f.name}': {_compile_err}",
+                })
+            except OSError as _read_err:
+                auditor_flags.append({
+                    "code": "BACKTEST_FILE_READ_ERROR",
+                    "message": f"Could not read strategy file '{_f.name}': {_read_err}",
+                })
         _data_files: list[tuple[str, str]] = []
         for _f in roles["data_files"] + roles["benchmark_files"]:
             try:
                 _data_files.append((_f.name, Path(_f.path).read_text(encoding="utf-8", errors="replace")))
-            except Exception:
-                pass
+            except OSError as _read_err:
+                auditor_flags.append({
+                    "code": "BACKTEST_FILE_READ_ERROR",
+                    "message": f"Could not read data file '{_f.name}': {_read_err}",
+                })
         _ticker = draft.tickers[0] if draft.tickers else "UNKNOWN"
         if _strat_files:
-            backtest_result = run_backtest_agent(
-                strategy_files=_strat_files,
-                data_files=_data_files,
-                pitch_context={"name": draft.pitch_id, "ticker": _ticker},
-            )
-            if backtest_result.status == "success" and backtest_result.metrics:
-                _strategy_obj, _v_errors = validate_and_load(backtest_result.metrics)
-                if _strategy_obj:
-                    backtest_scored = score_strategy(_strategy_obj)
-                    if backtest_scored.disqualified:
-                        for _reason in backtest_scored.disqualification_reasons:
-                            if _reason not in hard_reject_reasons:
-                                hard_reject_reasons.append(_reason)
-            elif backtest_result.status == "user_action_required":
+            try:
+                backtest_result = run_backtest_agent(
+                    strategy_files=_strat_files,
+                    data_files=_data_files,
+                    pitch_context={"name": draft.pitch_id, "ticker": _ticker},
+                )
+            except ValueError as _cfg_err:
+                # Missing ANTHROPIC_API_KEY — infrastructure config problem, surface it clearly.
                 auditor_flags.append({
-                    "code": "BACKTEST_USER_ACTION_REQUIRED",
-                    "severity": "high",
-                    "message": backtest_result.message,
+                    "code": "BACKTEST_CONFIG_ERROR",
+                    "message": f"Backtest agent misconfigured: {_cfg_err}. Falling back to CSV-based scoring.",
                 })
-            elif backtest_result.status == "agent_fault":
-                auditor_flags.append({
-                    "code": "BACKTEST_AGENT_FAULT",
-                    "severity": "medium",
-                    "message": (
-                        f"Backtest agent failed after {backtest_result.attempt_count} attempt(s). "
-                        "Falling back to CSV-based scoring."
-                    ),
-                })
+                backtest_result = None
+
+            if backtest_result is not None:
+                if backtest_result.status == "success" and backtest_result.metrics:
+                    _strategy_obj, _v_errors = validate_and_load(backtest_result.metrics)
+                    if _v_errors:
+                        auditor_flags.append({
+                            "code": "BACKTEST_SCHEMA_INVALID",
+                            "message": f"Backtest metrics failed validation: {_v_errors}",
+                        })
+                    if _strategy_obj:
+                        backtest_scored = score_strategy(_strategy_obj)
+                        if backtest_scored.disqualified:
+                            for _reason in backtest_scored.disqualification_reasons:
+                                if _reason not in hard_reject_reasons:
+                                    hard_reject_reasons.append(_reason)
+                elif backtest_result.status == "user_action_required":
+                    auditor_flags.append({
+                        "code": "BACKTEST_USER_ACTION_REQUIRED",
+                        "message": backtest_result.message,
+                    })
+                elif backtest_result.status == "agent_fault":
+                    auditor_flags.append({
+                        "code": "BACKTEST_AGENT_FAULT",
+                        "message": (
+                            f"Backtest agent failed after {backtest_result.attempt_count} attempt(s). "
+                            "Falling back to CSV-based scoring."
+                        ),
+                    })
 
     if not draft.source_urls:
         hard_reject_reasons.append("No source URL was provided for submitted data.")
         fetcher_flags.append(
             {
                 "code": "MISSING_SOURCE_URLS",
-                "severity": "critical",
                 "message": "Provide source URL(s) for all submitted datasets.",
             }
         )
@@ -1351,10 +1445,21 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         validator_flags.append(
             {
                 "code": "MISSING_TICKERS",
-                "severity": "critical",
                 "message": "Provide the stock ticker(s) for this pitch (for example: AAPL, MSFT).",
             }
         )
+
+    if draft.one_shot_mode:
+        if not _ONE_SHOT_VALIDATOR_AVAILABLE:
+            auditor_flags.append(
+                {
+                    "code": "ONE_SHOT_VALIDATOR_UNAVAILABLE",
+                    "message": "One-shot validator module is unavailable.",
+                }
+            )
+        else:
+            one_shot_result = evaluate_one_shot_strategy(draft=draft)
+            auditor_flags.extend(one_shot_result.flags)
 
     close_series = pd.Series(dtype=float)
     row_count = 0
@@ -1370,7 +1475,6 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         validator_flags.append(
             {
                 "code": "INSUFFICIENT_DATA",
-                "severity": "critical",
                 "message": "Upload a non-empty CSV or TSV with a close price column.",
             }
         )
@@ -1385,7 +1489,6 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
             validator_flags.append(
                 {
                     "code": "MISSING_PRICE_COLUMN",
-                    "severity": "critical",
                     "message": "Expected one of close/adj_close/price columns.",
                 }
             )
@@ -1397,7 +1500,6 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
             validator_flags.append(
                 {
                     "code": "INSUFFICIENT_DATA",
-                    "severity": "critical",
                     "message": "At least 30 valid rows are required.",
                 }
             )
@@ -1434,7 +1536,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         data_quality_score = clamp(1.0 - missing_fraction - (0.5 * duplicate_fraction))
 
     for warning in methodology_warnings:
-        auditor_flags.append({"code": "METHOD_WARN", "severity": "medium", "message": warning})
+        auditor_flags.append({"code": "METHOD_WARN", "message": warning})
 
     sharpe_n = clamp((sharpe + 1.0) / 3.0)
     drawdown_n = 1.0 - clamp(abs(max_drawdown) / 0.60)
@@ -1449,8 +1551,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         fetcher_flags.append(
             {
                 "code": "CUA_NOT_CONNECTED",
-                "severity": "low",
-                "message": "CUA validation was not run for this evaluation.",
+                "message": "CUA validation is mandatory and was not run for this evaluation.",
             }
         )
         match_rate = _match_rate(draft)
@@ -1471,7 +1572,9 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     validator_flags.extend(fabrication_result["flags"])
     auditor_flags.extend(coding_errors_result["flags"])
 
-    if backtest_scored is not None and not backtest_scored.disqualified:
+    if draft.one_shot_mode:
+        score = 100.0 if (one_shot_result and one_shot_result.recommendation == "VALID") else 0.0
+    elif backtest_scored is not None and not backtest_scored.disqualified:
         # Richer formula: 65% strategy-scorer composite + 35% data/methodology/provenance
         score = (
             0.65 * backtest_scored.composite_score
@@ -1490,9 +1593,8 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         )
     overall_score = round(score, 1)
 
-    has_critical = any(flag["severity"] == "critical" for flag in (validator_flags + auditor_flags + fetcher_flags))
-    if has_critical and "Critical validation issues detected." not in hard_reject_reasons:
-        hard_reject_reasons.append("Critical validation issues detected.")
+    if hard_reject_reasons:
+        hard_reject_reasons = list(dict.fromkeys(hard_reject_reasons))
 
     fabrication_verdict = str(fabrication_result.get("artifacts", {}).get("verdict", "unclear")).strip().lower()
     fabrication_confidence = float(fabrication_result.get("confidence", 0.0))
@@ -1509,7 +1611,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     coding_verdict = str(coding_errors_result.get("artifacts", {}).get("verdict", "clean")).strip().lower()
     has_actionable_issue = (
         coding_verdict == "errors_found"
-        or any(flag.get("severity") in {"medium", "high", "critical"} for flag in (fetcher_flags + auditor_flags))
+        or bool(fetcher_flags + auditor_flags)
         or (fabrication_verdict == "unclear" and fabrication_confidence >= 0.7)
     )
     if is_fabrication_blocked:
@@ -1517,6 +1619,17 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         user_facing_message = "Goodbye."
         allocation_usd = 0
         decision = "reject_fabrication"
+    elif draft.one_shot_mode and one_shot_result is not None:
+        allocation_usd = 0
+        if one_shot_result.recommendation == "VALID":
+            validation_outcome = VALIDATION_OUTCOME_READY
+            user_facing_message = "One-shot strategy is statistically valid and ready for final review."
+            decision = "one_shot_valid"
+        else:
+            validation_outcome = VALIDATION_OUTCOME_CLARIFY
+            user_facing_message = "One-shot strategy is not yet statistically valid. Please address the listed gaps."
+            decision = "one_shot_not_valid"
+            validation_questions = sorted(set(validation_questions + one_shot_result.validation_questions))
     elif has_actionable_issue or hard_reject_reasons:
         validation_outcome = VALIDATION_OUTCOME_CLARIFY
         user_facing_message = "I found issues that need clarification before final review."
@@ -1528,9 +1641,9 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         allocation_usd = _compute_allocation(overall_score, draft.time_horizon)
         decision = "ready_for_final_review"
 
-    fetcher_status = "fail" if any(flag["severity"] == "critical" for flag in fetcher_flags) else "warn"
-    validator_status = "fail" if any(flag["severity"] == "critical" for flag in validator_flags) else "ok"
-    auditor_status = "fail" if any(flag["severity"] == "critical" for flag in auditor_flags) else "warn"
+    fetcher_status = "warn" if fetcher_flags else "ok"
+    validator_status = "warn" if validator_flags else "ok"
+    auditor_status = "warn" if auditor_flags else "ok"
 
     fetcher_summary = "CUA integration placeholder from Chainlit intake."
     fetcher_confidence = 0.45
@@ -1585,19 +1698,38 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         "scoring": {
             "agent": "scoring",
             "status": "ok",
-            "confidence": 0.9 if (backtest_scored and not backtest_scored.disqualified) else 0.8,
-            "summary": (
-                "Strategy-scorer composite from backtest agent."
-                if (backtest_scored and not backtest_scored.disqualified)
-                else "Deterministic v0 CSV-based scoring."
+            "confidence": (
+                float(one_shot_result.confidence)
+                if (draft.one_shot_mode and one_shot_result is not None)
+                else (0.9 if (backtest_scored and not backtest_scored.disqualified) else 0.8)
             ),
-            "flags": [],
+            "summary": (
+                "One-shot strategy binary recommendation."
+                if draft.one_shot_mode
+                else (
+                    "Strategy-scorer composite from backtest agent."
+                    if (backtest_scored and not backtest_scored.disqualified)
+                    else "Deterministic v0 CSV-based scoring."
+                )
+            ),
+            "flags": [] if not draft.one_shot_mode else (one_shot_result.flags if one_shot_result else []),
             "artifacts": {
-                "source": "strategy_scorer" if (backtest_scored and not backtest_scored.disqualified) else "csv_approximation",
+                "source": (
+                    "one_shot"
+                    if draft.one_shot_mode
+                    else ("strategy_scorer" if (backtest_scored and not backtest_scored.disqualified) else "csv_approximation")
+                ),
                 "sharpe": round(sharpe, 4),
                 "max_drawdown": round(max_drawdown, 4),
                 "risk_score": round(risk_score, 4),
                 "time_to_return_days": time_to_return_days,
+                "one_shot_mode": draft.one_shot_mode,
+                "one_shot_recommendation": (
+                    one_shot_result.recommendation if (draft.one_shot_mode and one_shot_result is not None) else None
+                ),
+                "one_shot_artifacts": (
+                    one_shot_result.artifacts if (draft.one_shot_mode and one_shot_result is not None) else None
+                ),
                 **(
                     {
                         "composite_score": backtest_scored.composite_score,
@@ -1622,6 +1754,16 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
             "latency_ms": 0,
         },
     }
+    if draft.one_shot_mode and one_shot_result is not None:
+        agent_outputs["one_shot_validator"] = {
+            "agent": "one_shot_validator",
+            "status": one_shot_result.status,
+            "confidence": one_shot_result.confidence,
+            "summary": one_shot_result.summary,
+            "flags": one_shot_result.flags,
+            "artifacts": one_shot_result.artifacts,
+            "latency_ms": one_shot_result.latency_ms,
+        }
 
     report_lines = [
         f"# Pitch Result: `{draft.pitch_id}`",
@@ -1639,10 +1781,30 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         f"- Data quality score: `{round(data_quality_score, 4)}`",
         f"- Methodology score: `{round(method_score, 4)}`",
         f"- Match rate: `{round(match_rate, 4)}`",
-        f"- Scoring source: `{'strategy_scorer' if (backtest_scored and not backtest_scored.disqualified) else 'csv_approximation'}`",
+        f"- Scoring source: `{'one_shot' if draft.one_shot_mode else ('strategy_scorer' if (backtest_scored and not backtest_scored.disqualified) else 'csv_approximation')}`",
     ]
 
-    if backtest_scored is not None and not backtest_scored.disqualified and backtest_result and backtest_result.metrics:
+    if draft.one_shot_mode and one_shot_result is not None:
+        report_lines.extend(
+            [
+                "",
+                "## One-Shot Validation",
+                f"- Recommendation: **{one_shot_result.recommendation}**",
+                f"- Summary: {one_shot_result.summary}",
+            ]
+        )
+        for criterion in one_shot_result.artifacts.get("criteria", []):
+            criterion_name = str(criterion.get("node", "criterion"))
+            verdict = "PASS" if criterion.get("pass") else "FAIL"
+            report_lines.append(f"- `{criterion_name}`: **{verdict}**")
+
+    if (
+        not draft.one_shot_mode
+        and backtest_scored is not None
+        and not backtest_scored.disqualified
+        and backtest_result
+        and backtest_result.metrics
+    ):
         m = backtest_result.metrics
         report_lines.extend([
             "",
@@ -1674,12 +1836,14 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
             report_lines.append(f"- {question}")
 
     report_lines.extend(["", "## Agent Flags"])
-    for agent_name in ("data_fetcher", "data_validator", "pipeline_auditor"):
+    for agent_name in ("data_fetcher", "data_validator", "pipeline_auditor", "one_shot_validator"):
+        if agent_name not in agent_outputs:
+            continue
         flags = agent_outputs[agent_name]["flags"]
         if flags:
             for flag in flags:
                 report_lines.append(
-                    f"- `{agent_name}` `{flag['severity']}` `{flag['code']}`: {flag['message']}"
+                    f"- `{agent_name}` `{flag['code']}`: {flag['message']}"
                 )
         else:
             report_lines.append(f"- `{agent_name}`: no flags")

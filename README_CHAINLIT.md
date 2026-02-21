@@ -39,6 +39,6 @@ Then open the local URL shown by Chainlit.
 - Files are uploaded from the normal chat attachment UI (no `/upload` command).
 - Evaluation requires: thesis, time horizon (`days|weeks|months|years`), stock tickers, methodology summary, and source URL(s).
 - `/evaluate` runs local v0 scoring rules from `MVP_SPEC.md`.
-- `/backtest` runs the Claude backtest agent on any uploaded `.py` strategy file. Claude generates a standardised runner, executes it in a temp directory, and validates the output over up to 3 attempts. Results are saved to `data/pitches/{pitch_id}/agent_outputs/backtest_agent.json`.
+- `/backtest` runs the Claude backtest agent on any uploaded `.py` or `.ipynb` strategy file. Notebook uploads are compiled into linear `.py` scripts first. Claude then generates a standardised runner, executes it in a temp directory, and validates the output over up to 3 attempts. Results are saved to `data/pitches/{pitch_id}/agent_outputs/backtest_agent.json`.
 - `/validate_data "file_to_validate" "notes"` runs CUA against source URLs: CUA opens the staged reference file first, then navigates and downloads with GUI-first behavior (fallback scripts allowed when needed).
 - Downloaded candidates are reviewed by an LLM against the reference file; when mismatch is detected, CUA is retried automatically with mismatch feedback.

@@ -33,6 +33,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -112,40 +113,166 @@ Required JSON fields:
 }
 """.strip()
 
+# ---------------------------------------------------------------------------
+# Alpaca benchmark fetch snippet — injected verbatim into every generated script.
+# ---------------------------------------------------------------------------
+ALPACA_BENCHMARK_SNIPPET = '''
+def _fetch_benchmark_alpaca(
+    ticker: str,
+    start: str,
+    end: str,
+    timeframe: str = "1Day",
+    adjustment: str = "all",
+    feed: str = "sip",
+    limit: int = 10000,
+    sort: str = "asc",
+) -> "pd.DataFrame":
+    """
+    Fetch benchmark close prices from Alpaca Markets for buy-and-hold benchmark.
+    Supports daily or intraday bars depending on `timeframe`.
+    Returns a DataFrame with columns [date, close] sorted by timestamp.
+    Raises RuntimeError on any failure — no silent fallbacks.
+    """
+    import os, json, urllib.request, urllib.parse, urllib.error, re
+    api_key    = os.getenv("ALPACA_API_KEY", "")
+    api_secret = os.getenv("ALPACA_API_SECRET", "")
+    if not api_key or not api_secret:
+        raise RuntimeError("ALPACA_API_KEY or ALPACA_API_SECRET environment variable is not set.")
+
+    timeframe = str(timeframe or "1Day").strip()
+    if not re.match(r"^[1-9][0-9]*(Min|Hour|Day|Week|Month)$", timeframe):
+        raise RuntimeError(
+            f"Invalid Alpaca timeframe '{timeframe}'. "
+            "Expected values like 1Min, 5Min, 15Min, 1Hour, 1Day."
+        )
+    adjustment = str(adjustment or "all").strip().lower()
+    if adjustment not in {"raw", "split", "dividend", "all"}:
+        raise RuntimeError(f"Invalid Alpaca adjustment '{adjustment}'.")
+    feed = str(feed or "sip").strip().lower()
+    if feed not in {"sip", "iex", "otc"}:
+        raise RuntimeError(f"Invalid Alpaca feed '{feed}'.")
+    sort = str(sort or "asc").strip().lower()
+    if sort not in {"asc", "desc"}:
+        raise RuntimeError(f"Invalid Alpaca sort '{sort}'.")
+    try:
+        limit = max(1, min(10000, int(limit)))
+    except Exception as exc:
+        raise RuntimeError(f"Invalid Alpaca limit '{limit}'.") from exc
+
+    base_url = "https://data.alpaca.markets/v2/stocks/bars"
+    headers  = {
+        "APCA-API-KEY-ID":     api_key,
+        "APCA-API-SECRET-KEY": api_secret,
+        "Accept":              "application/json",
+    }
+    bars = []
+    page_token = None
+    while True:
+        params = {
+            "symbols":    ticker,
+            "timeframe":  timeframe,
+            "start":      start,
+            "end":        end,
+            "adjustment": adjustment,
+            "feed":       feed,
+            "limit":      str(limit),
+            "sort":       sort,
+        }
+        if page_token:
+            params["page_token"] = page_token
+        url = base_url + "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Alpaca API HTTP error {exc.code}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Alpaca API network error: {exc.reason}") from exc
+
+        symbol_bars = data.get("bars", {}).get(ticker.upper(), [])
+        bars.extend(symbol_bars)
+        page_token = data.get("next_page_token")
+        if not page_token:
+            break
+
+    if not bars:
+        raise RuntimeError(
+            f"Alpaca returned 0 bars for {ticker} between {start} and {end}. "
+            "Check that the ticker is valid and the date range covers trading days."
+        )
+
+    import pandas as pd
+    df = pd.DataFrame(bars)
+    # Alpaca bar fields: t=timestamp, c=close, o=open, h=high, l=low, v=volume, vw=vwap
+    df["date"]  = pd.to_datetime(df["t"], errors="coerce", utc=True).dt.tz_localize(None)
+    df["close"] = pd.to_numeric(df["c"], errors="coerce")
+    df = df[["date", "close"]].dropna().drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+    if df.empty:
+        raise RuntimeError(f"Alpaca bars for {ticker} contained no parseable close prices.")
+    return df
+'''.strip()
+
 # System prompt for the CREATE/FIX phase (Phase 1).
-CREATE_SYSTEM_PROMPT = """
+CREATE_SYSTEM_PROMPT = ("""
 You are an expert quant Python developer. Your job is to produce a SINGLE,
 self-contained Python script that:
 
 1. Loads the user's strategy files and data files from the CURRENT WORKING DIRECTORY.
 2. Runs the strategy and any machine-learning / signal logic it contains.
-3. Fetches benchmark buy-and-hold data for the same ticker and period using yfinance.
+3. Fetches benchmark buy-and-hold data for the same ticker and period using the
+   Alpaca Markets REST API (function provided below — copy it verbatim).
 4. Computes ALL required output metrics (see schema below).
 5. Prints the final JSON object to stdout as the very last thing.
    All other prints MUST use stderr.
 
 Constraints:
-- Only use: json, math, os, sys, pathlib, datetime, numpy, pandas, scipy, sklearn, yfinance,
-  statsmodels. No other third-party imports.
+- Only use: json, math, os, sys, pathlib, datetime, urllib, numpy, pandas, scipy,
+  sklearn, statsmodels. No other third-party imports. No yfinance.
 - If the strategy file defines a function, call it. If it is a script, adapt it.
 - The equity curve must be derived from the strategy's actual signals/positions.
 - Trades must be extracted or inferred from the position changes.
-- For the benchmark, call:
-    import yfinance as yf
-    bench = yf.download(ticker, start=backtest_start, end=backtest_end, progress=False)
-  Use the Adj Close column for benchmark returns. If yfinance fails, compute
-  buy-and-hold from the same price data the user uploaded.
+- For the benchmark, COPY the _fetch_benchmark_alpaca function below VERBATIM into
+  your script and call it with inferred parameters:
+      bench_df = _fetch_benchmark_alpaca(
+          ticker=ticker,
+          start=backtest_start,
+          end=backtest_end,
+          timeframe=benchmark_timeframe,
+          adjustment=benchmark_adjustment,
+          feed=benchmark_feed,
+          limit=benchmark_limit,
+          sort="asc",
+      )
+  This function raises RuntimeError on any failure (missing credentials, network
+  error, no data). Do NOT catch or suppress these errors — let the script exit with
+  a non-zero code so the issue is surfaced clearly.
+- Infer benchmark API parameters from the strategy/data:
+    1) timeframe: derive from bar cadence if possible (examples: 1Min, 5Min, 15Min, 1Hour, 1Day)
+    2) adjustment: choose based on strategy/data assumptions (typically "all")
+    3) feed: prefer "sip", but choose "iex" if appropriate for the strategy context
+    4) limit: dynamic based on expected bar count (do not hardcode blindly)
+- If using intraday bars, compute annualization using an inferred bars-per-year factor
+  consistent with the chosen timeframe (do not assume 252 daily bars in that case).
+- If cadence cannot be inferred confidently, default to timeframe="1Day" and print that
+  fallback decision to stderr.
 - Column name aliases for price data (accept any of these):
     date column:   date, Date, timestamp, timestamp_utc, datetime, Datetime
     close column:  close, Close, adj_close, Adj Close, adj close, price, Price, last
     return column: daily_return, returns, return, pct_return, ret, Return
     portfolio value: portfolio_value, equity, value, nav, wealth, NAV
 
+ALPACA FUNCTION TO COPY VERBATIM:
+{alpaca_snippet}
+
 {schema}
 
 CRITICAL: Output ONLY the Python script. No explanation, no markdown fences, no prose.
 Just raw Python code starting with imports.
-""".strip().format(schema=REQUIRED_OUTPUT_SCHEMA)
+"""
+    .strip()
+    .format(alpaca_snippet=ALPACA_BENCHMARK_SNIPPET, schema=REQUIRED_OUTPUT_SCHEMA)
+)
 
 # System prompt for the REVIEW phase (Phase 3).
 REVIEW_SYSTEM_PROMPT = """
@@ -287,11 +414,15 @@ def _extract_script(text: str) -> str:
     """
     Claude should return raw Python with no fences. But in case it adds
     markdown fences, strip them.
+    Raises ValueError if the result is empty.
     """
     # Strip ```python ... ``` or ``` ... ```
     fenced = re.sub(r"^```(?:python)?\s*\n", "", text.strip(), flags=re.MULTILINE)
     fenced = re.sub(r"\n```\s*$", "", fenced.strip(), flags=re.MULTILINE)
-    return fenced.strip()
+    result = fenced.strip()
+    if not result:
+        raise ValueError("Claude returned an empty script response.")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +514,7 @@ def _phase_create(
 
     response = client.messages.create(
         model=_ANTHROPIC_MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         system=CREATE_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
@@ -404,6 +535,7 @@ def _phase_run(
     """
     Write script + all files to tmp_dir, execute it.
     Returns (stdout, stderr, returncode).
+    Timeouts are returned as ("TIMEOUT", ...) so the review phase can be specific.
     """
     # Write generated runner
     runner_path = tmp_dir / "_backtest_runner.py"
@@ -426,10 +558,14 @@ def _phase_run(
             timeout=BACKTEST_TIMEOUT_SECONDS,
         )
         return result.stdout, result.stderr, result.returncode
-    except subprocess.TimeoutExpired:
-        return "", f"Script timed out after {BACKTEST_TIMEOUT_SECONDS}s", 1
-    except Exception as exc:
-        return "", str(exc), 1
+    except subprocess.TimeoutExpired as exc:
+        def _decode(v: Any) -> str:
+            if isinstance(v, bytes):
+                return v.decode(errors="replace")
+            return str(v) if v is not None else ""
+        partial_stdout = _decode(exc.stdout)
+        partial_stderr = _decode(exc.stderr)
+        return partial_stdout, f"TIMEOUT: script exceeded {BACKTEST_TIMEOUT_SECONDS}s.\n{partial_stderr}", 1
 
 
 # ---------------------------------------------------------------------------
@@ -514,13 +650,17 @@ def run_backtest_agent(
     """
     try:
         client = _get_anthropic_client()
-    except (ImportError, ValueError) as exc:
+    except ImportError as exc:
         return BacktestTermination(
             status="agent_fault",
             metrics=None,
             message=str(exc),
             attempt_count=0,
         )
+    except ValueError:
+        # Misconfiguration (missing API key) — re-raise so the caller knows
+        # this is an infrastructure problem, not a strategy problem.
+        raise
 
     attempt_history: list[AttemptRecord] = []
     prior_feedback: str | None = None
@@ -555,7 +695,10 @@ def run_backtest_agent(
                     prior_stderr=prior_stderr,
                 )
             except Exception as exc:
-                review_feedback = f"Phase-1 (create) exception: {exc}"
+                review_feedback = (
+                    f"Phase-1 (create) exception: {type(exc).__name__}: {exc}\n"
+                    f"{traceback.format_exc()}"
+                )
                 attempt_history.append(AttemptRecord(
                     attempt=attempt_num,
                     phase_reached=phase_reached,
@@ -596,7 +739,10 @@ def run_backtest_agent(
                 )
             except Exception as exc:
                 review_verdict = "agent_fault"
-                review_feedback = f"Phase-3 (review) exception: {exc}"
+                review_feedback = (
+                    f"Phase-3 (review) exception: {type(exc).__name__}: {exc}\n"
+                    f"{traceback.format_exc()}"
+                )
                 review_message = ""
 
             latency_ms = int((time.monotonic() - t_start) * 1000)
@@ -615,12 +761,23 @@ def run_backtest_agent(
 
             if review_verdict == "success":
                 # Extract and enrich metrics with name + ticker from context
-                metrics = _extract_stdout_json(stdout) or {}
-                metrics["name"] = pitch_context.get("name", "strategy")
-                metrics["ticker"] = pitch_context.get("ticker", "UNKNOWN")
+                raw_metrics = _extract_stdout_json(stdout) or {}
+                raw_metrics["name"] = pitch_context.get("name", "strategy")
+                raw_metrics["ticker"] = pitch_context.get("ticker", "UNKNOWN")
 
-                # Ensure numeric types
-                metrics = _coerce_metric_types(metrics)
+                # Coerce and validate numeric types — treat NaN/Inf as agent fault
+                try:
+                    metrics = _coerce_metric_types(raw_metrics)
+                except ValueError as exc:
+                    review_verdict = "agent_fault"
+                    review_feedback = f"Metric type coercion failed: {exc}"
+                    prior_feedback = review_feedback
+                    prior_script = script
+                    prior_stdout = stdout
+                    prior_stderr = stderr
+                    attempt_history[-1].review_verdict = review_verdict
+                    attempt_history[-1].review_feedback = review_feedback
+                    continue
 
                 return BacktestTermination(
                     status="success",
@@ -667,7 +824,11 @@ def run_backtest_agent(
 # ---------------------------------------------------------------------------
 
 def _coerce_metric_types(metrics: dict) -> dict:
-    """Cast numeric fields to correct Python types."""
+    """
+    Cast numeric fields to correct Python types.
+    Raises ValueError if any required numeric field contains NaN or Inf,
+    which indicates a corrupt backtest result that should be caught by review.
+    """
     int_fields = {"max_drawdown_duration", "total_trades"}
     float_fields = REQUIRED_OUTPUT_FIELDS - int_fields - {"backtest_start", "backtest_end"}
     str_fields = {"backtest_start", "backtest_end", "name", "ticker"}
@@ -677,15 +838,20 @@ def _coerce_metric_types(metrics: dict) -> dict:
         if key in result:
             try:
                 v = float(result[key])
-                result[key] = 0.0 if (math.isnan(v) or math.isinf(v)) else v
-            except (TypeError, ValueError):
-                result[key] = 0.0
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Metric '{key}' is not numeric: {result[key]!r}") from exc
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError(
+                    f"Metric '{key}' is {v!r} — backtest produced non-finite result. "
+                    "This is a bug in the generated script."
+                )
+            result[key] = v
     for key in int_fields:
         if key in result:
             try:
                 result[key] = int(result[key])
-            except (TypeError, ValueError):
-                result[key] = 0
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Metric '{key}' is not an integer: {result[key]!r}") from exc
     for key in str_fields:
         if key in result:
             result[key] = str(result[key])

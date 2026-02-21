@@ -26,11 +26,14 @@ Quant Pitch Evaluator helps strong independent quants submit stock ideas and get
    - methodology summary,
    - source URL(s) for submitted data.
 4. User uploads supporting files:
-   - **strategy script** (`.py`) — required for backtest agent scoring.
+   - **strategy script** (`.py` or `.ipynb`) — required for backtest agent scoring.
    - **price data CSV** — used by both the backtest agent and CSV-based fallback.
    - benchmark CSV (optional, filename must contain `benchmark`/`market`/`spy`) — auto-detected.
-5. User can run `/backtest` to test the backtest agent standalone before `/evaluate`.
-6. Evaluation outcome:
+5. Once intake is complete, evaluation auto-runs (chat-style; commands are optional).
+6. Before scoring, CUA automatically validates every uploaded data file against submitted source URLs.
+7. User can still run `/backtest` as an optional standalone pre-check.
+8. For event-driven non-repeatable theses, user can use `/oneshot on` or include `one_shot_mode=true` in chat.
+9. Evaluation outcome:
    - fabricated/cheating signal -> `Goodbye.`
    - missing/unclear validation aspects -> clarification loop and `/validate`
    - clean validation -> ready for final review with `Congrats!`
@@ -108,6 +111,38 @@ Important: `docker run build` is not a valid build command. Use `docker compose 
 - Keep user inputs minimal but meaningful.
 - Keep scoring deterministic in MVP.
 - Prefer clarity and auditability over complexity.
+
+## One-shot strategy mode
+
+For single-event strategies (where Sharpe/win-rate are not meaningful), use:
+
+```powershell
+/oneshot on
+```
+
+Then run `/evaluate`. The system returns a binary recommendation (`VALID` / `NOT_VALID`) and does not assign USD allocation.
+
+Minimum one-shot inputs:
+- Node 1 relationship history CSV (driver and asset-return columns, >=30 rows)
+- Node 2 forecast calibration CSV (`forecast_prob`, `outcome`, >=20 rows)
+- Node 3 magnitude history CSV (`drought_severity`, `wheat_change`, >=8 rows)
+- Node 4 assumptions in methodology text:
+  - `p_true=...`
+  - `p_market=...`
+  - `payoff_up=...`
+  - `payoff_down=...`
+  - optional `transaction_cost=...`
+
+Variant shortcuts (easiest implemented):
+- `one_shot_event_type=causal_chain` (default): uses Nodes 1-4 + Monte Carlo.
+- `one_shot_event_type=binary_event`: uses Node 2 + Node 4 + Monte Carlo (skips Nodes 1 and 3).
+- `one_shot_event_type=deal_spread`: uses Node 2 + deal-pricing node + Monte Carlo.
+  - Required methodology keys:
+    - `p_close=...`
+    - `current_price=...`
+    - `price_if_close=...`
+    - `price_if_break=...`
+    - optional `transaction_cost=...`
 
 ## Test scripts
 

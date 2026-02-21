@@ -138,6 +138,8 @@ Runtime contract (CUA mode):
 - Matching is dynamic (schema/entity/date-range reasoning), not tied to fixed filename or extension rules.
 - Post-download file matching is reviewed by an LLM against the reference file profile.
 - If mismatch is detected, CUA is re-run with explicit retry guidance until match or retry limit is reached.
+- During full pitch evaluation, CUA validation is mandatory for every uploaded CSV/TSV data file before scoring.
+- If any required data file lacks a clean CUA validation result, evaluation is routed to clarification (anti-scam gate).
 
 Critical examples:
 - `UNREACHABLE_SOURCE_ALL`
@@ -179,15 +181,15 @@ Computes:
 
 ### 8.5 Backtest Agent (`backtest_agent.py`)
 
-Triggered automatically during `/evaluate` (and manually via `/backtest`) when the user uploads a `.py` strategy file.
+Triggered automatically during `/evaluate` (and manually via `/backtest`) when the user uploads a `.py` or `.ipynb` strategy file.
 
 **File role detection** (auto-classifies all uploaded files):
-- `.py` → strategy scripts
+- `.py`/`.ipynb` → strategy scripts
 - `.csv`/`.tsv` with `benchmark`/`market`/`index`/`spy` in name → benchmark files
 - other `.csv`/`.tsv` → price data files
 
 **3-attempt loop per run:**
-- **Phase 1 – CREATE/FIX**: Claude (`ANTHROPIC_MODEL`) generates a self-contained Python runner that loads the user's strategy, runs it, fetches benchmark data via `yfinance`, computes all required metrics, and prints a JSON object to stdout.
+- **Phase 1 – CREATE/FIX**: Claude (`ANTHROPIC_MODEL`) generates a self-contained Python runner that loads the user's strategy, runs it, fetches benchmark data via Alpaca REST bars with dynamic request params (including timeframe/feed/adjustment inferred from strategy/data), computes all required metrics, and prints a JSON object to stdout.
 - **Phase 2 – RUN**: `subprocess.run` executes the generated script in an isolated temp directory (timeout: `BACKTEST_TIMEOUT_SECONDS`, default 120s).
 - **Phase 3 – REVIEW**: Claude validates the JSON output and decides the termination verdict.
 
@@ -210,6 +212,33 @@ overall_score = 0.65 × strategy_scorer_composite
 `backtest_start`, `backtest_end`, `cagr`, `total_return`, `volatility`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `max_drawdown`, `max_drawdown_duration`, `total_trades`, `win_rate`, `avg_win`, `avg_loss`, `profit_factor`, `expectancy`, `benchmark_cagr`, `benchmark_max_drawdown`, `benchmark_total_return`, `alpha`, `information_ratio`, `excess_return`, `up_capture`, `down_capture`.
 
 `name` and `ticker` are injected from the pitch context.
+
+### 8.6 One-shot Strategy Validator (`one_shot_validator.py`)
+
+Triggered only when the user explicitly enables one-shot mode via `/oneshot on`.
+
+Purpose:
+- Validate event-driven single-trade theses where repeated-trade metrics (Sharpe/win-rate) are not the primary evidence.
+
+Node checks:
+- `causal_chain` (default): Node 1 + Node 2 + Node 3 + Node 4 + Monte Carlo
+- `binary_event`: Node 2 + Node 4 + Monte Carlo
+- `deal_spread`: Node 2 + deal-pricing node + Monte Carlo
+
+`one_shot_event_type` is read from methodology text:
+- `one_shot_event_type=causal_chain|binary_event|deal_spread`
+
+Deal-spread node required keys:
+- `p_close`
+- `current_price`
+- `price_if_close`
+- `price_if_break`
+- optional `transaction_cost`
+
+Decision output:
+- Binary recommendation only: `VALID` or `NOT_VALID`
+- No USD allocation is computed in one-shot mode (`allocation_usd = 0`)
+- Missing node inputs produce explicit clarification questions and widened Monte Carlo uncertainty
 
 ## 9) Scoring & Allocation Policy (v0)
 
@@ -296,7 +325,7 @@ data/
 ## 12) Reliability and Security Baseline
 
 - Limit upload types and size caps.
-- Never execute uploaded notebooks.
+- For MVP, notebooks may be executed as compiled linear scripts in isolated runtime.
 - Isolate browser/data-fetch runtime.
 - Log all external URL access attempts.
 - Redact secrets from logs.
