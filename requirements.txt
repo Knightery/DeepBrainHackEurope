@@ -6,3 +6,5 @@ anthropic>=0.50.0
 yfinance>=0.2.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
+fastapi
+uvicorn[standard]

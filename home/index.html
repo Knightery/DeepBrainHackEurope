@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anyquant | Alpha Can Come From Anyone</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html { scroll-behavior: auto; overscroll-behavior: none; }
+        body {
+            font-family: 'Space Grotesk', -apple-system, sans-serif;
+            background: #000; color: #fff;
+            overflow-x: hidden; overscroll-behavior: none; -webkit-font-smoothing: antialiased;
+        }
+        nav {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 16px 40px; transition: background 0.4s, box-shadow 0.4s;
+        }
+        nav.scrolled {
+            background: rgba(0,0,0,0.88);
+            backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+            box-shadow: 0 1px 0 rgba(255,255,255,0.06);
+        }
+        .logo img { height: 28px; display: block; filter: brightness(1.1); }
+        .btn-launch {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 9px 22px; background: #fff; color: #000;
+            text-decoration: none; border-radius: 7px;
+            font-weight: 600; font-size: 0.88rem; font-family: inherit;
+            transition: all 0.25s; border: none; cursor: pointer;
+        }
+        .btn-launch:hover {
+            background: #e0e0e0; transform: translateY(-1px);
+            box-shadow: 0 4px 20px rgba(255,255,255,0.12);
+        }
+        .scroll-section { position: relative; }
+        .scroll-section .canvas-wrap {
+            position: sticky; top: 0; width: 100%; height: 100vh; overflow: hidden;
+        }
+        .scroll-section canvas { display: block; width: 100%; height: 100%; }
+
+        .hero-cta {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 60; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 20px;
+            opacity: 0; pointer-events: none; transition: opacity 0.35s;
+        }
+        .hero-cta.visible { opacity: 1; pointer-events: auto; }
+        .hero-cta-label {
+            font-size: clamp(2.4rem, 5vw, 4.2rem);
+            font-weight: 700; letter-spacing: -0.03em;
+            text-shadow: 0 0 60px rgba(255,255,255,0.15);
+        }
+        .hero-cta-buttons { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+        .hero-cta-btn {
+            display: inline-flex; align-items: center; gap: 10px;
+            padding: 18px 48px; background: #fff; color: #000;
+            text-decoration: none; border-radius: 12px;
+            font-weight: 700; font-size: 1.1rem; font-family: inherit;
+            transition: all 0.25s; border: none; cursor: pointer;
+            box-shadow: 0 0 40px rgba(255,255,255,0.08);
+        }
+        .hero-cta-btn:hover {
+            background: #e0e0e0; transform: translateY(-2px) scale(1.02);
+            box-shadow: 0 8px 40px rgba(255,255,255,0.15);
+        }
+        .hero-cta-btn.secondary {
+            background: transparent; color: #fff;
+            border: 1px solid rgba(255,255,255,0.2);
+            box-shadow: none;
+        }
+        .hero-cta-btn.secondary:hover {
+            background: rgba(255,255,255,0.06);
+            border-color: rgba(255,255,255,0.4);
+        }
+
+        .scroll-indicator {
+            position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+            z-index: 50; pointer-events: none;
+            transition: opacity 0.5s; opacity: 1;
+        }
+        .scroll-indicator.hidden { opacity: 0; }
+        @media (max-width: 768px) { nav { padding: 14px 20px; } }
+    </style>
+</head>
+<body>
+
+    <nav id="navbar">
+        <a class="logo" href="/home"><img src="/home/static/Anyquant_banner.png" alt="Anyquant"></a>
+        <a href="/app" class="btn-launch">Launch App <span>→</span></a>
+    </nav>
+
+    <div class="scroll-indicator" id="scrollIndicator">
+        <canvas id="scrollCanvas"></canvas>
+    </div>
+
+    <div class="hero-cta" id="heroCta">
+        <div class="hero-cta-label">Start here</div>
+        <div class="hero-cta-buttons">
+            <a href="/app" class="hero-cta-btn">Launch App →</a>
+            <a href="https://forms.gle/YOUR_FORM_ID" target="_blank" rel="noopener" class="hero-cta-btn secondary">Join Waitlist</a>
+        </div>
+    </div>
+
+    <section class="scroll-section" id="hero" style="height: 620vh;">
+        <div class="canvas-wrap"><canvas id="heroCanvas"></canvas></div>
+    </section>
+
+
+<script>
+const CELL = 10, SQ = 8, GAP = 1, BASE = '#0c0c0c';
+const MAP_ALPHA = 0.18;
+
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function lerp(a,b,t){return a+(b-a)*t}
+function easeIO(t){return t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2}
+function getSP(s){const r=s.getBoundingClientRect(),d=s.offsetHeight-innerHeight;return d<=0?0:clamp(-r.top/d,0,1)}
+
+const PH={
+    REVEAL:[0,.12], HOLD0:[.12,.15],
+    M01:[.15,.38],  HOLD1:[.38,.41],
+    M12:[.41,.64],  HOLD2:[.64,.67],
+    M2M:[.67,.97],  CTA:[.97,1],
+};
+function phP(p,ph){return clamp((p-ph[0])/(ph[1]-ph[0]),0,1)}
+
+function makeGrid(c){
+    const d=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+    c.width=w*d;c.height=h*d;const x=c.getContext('2d');x.scale(d,d);
+    return{ctx:x,w,h,cols:Math.ceil(w/CELL),rows:Math.ceil(h/CELL),pat:null};
+}
+function gridPat(x){
+    const c=document.createElement('canvas');c.width=c.height=CELL;
+    const p=c.getContext('2d');p.fillStyle=BASE;p.fillRect(GAP,GAP,SQ,SQ);
+    return x.createPattern(c,'repeat');
+}
+
+function textBM(lines,cols,rows){
+    const S=4,sw=cols*S,sh=rows*S,off=document.createElement('canvas');
+    off.width=sw;off.height=sh;const c=off.getContext('2d');
+    let fs=Math.floor(sh*.22);const sp=1.35;
+    c.font=`bold ${fs}px "Space Grotesk",sans-serif`;
+    let mw=0;for(const l of lines)mw=Math.max(mw,c.measureText(l).width);
+    while(mw>sw*.85&&fs>10){fs--;c.font=`bold ${fs}px "Space Grotesk",sans-serif`;mw=0;for(const l of lines)mw=Math.max(mw,c.measureText(l).width)}
+    c.fillStyle='#fff';c.textAlign='center';c.textBaseline='middle';
+    const y0=sh/2-(lines.length-1)*fs*sp/2;
+    for(let i=0;i<lines.length;i++)c.fillText(lines[i],sw/2,y0+i*fs*sp);
+    const id=c.getImageData(0,0,sw,sh),bm=[];
+    for(let r=0;r<rows;r++){const row=[];for(let cl=0;cl<cols;cl++){let f=0;for(let dy=0;dy<S;dy++)for(let dx=0;dx<S;dx++){if(id.data[((r*S+dy)*sw+cl*S+dx)*4+3]>60)f++}row.push(f>S*S*.25)}bm.push(row)}
+    return bm;
+}
+
+/* ── High-detail world map ── */
+function mapBM(cols,rows){
+    const S=3, sw=cols*S, sh=rows*S;
+    const off=document.createElement('canvas');
+    off.width=sw;off.height=sh;
+    const c=off.getContext('2d');
+    c.fillStyle='#fff';
+
+    function poly(pts){
+        if(pts.length<3)return;
+        c.beginPath();c.moveTo(pts[0][0]*sw,pts[0][1]*sh);
+        for(let i=1;i<pts.length;i++)c.lineTo(pts[i][0]*sw,pts[i][1]*sh);
+        c.closePath();c.fill();
+    }
+
+    const P=[
+        // North America
+        [[.03,.13],[.04,.11],[.06,.10],[.08,.11],[.10,.12],[.11,.15],[.11,.18],[.12,.21],[.12,.24],[.13,.27],[.13,.30],[.14,.33],[.13,.36],[.14,.38],[.16,.40],[.18,.41],[.20,.43],[.22,.45],[.22,.42],[.23,.39],[.24,.37],[.25,.38],[.26,.40],[.25,.41],[.24,.40],[.23,.39],[.25,.37],[.27,.34],[.28,.30],[.29,.27],[.30,.24],[.30,.22],[.29,.19],[.28,.17],[.26,.15],[.24,.14],[.22,.16],[.20,.17],[.18,.15],[.15,.13],[.10,.12],[.06,.12]],
+        // Greenland
+        [[.31,.07],[.33,.05],[.36,.04],[.38,.06],[.39,.09],[.38,.13],[.36,.15],[.34,.16],[.32,.15],[.30,.12],[.30,.09]],
+        // South America
+        [[.22,.47],[.24,.46],[.27,.46],[.29,.45],[.31,.47],[.33,.49],[.35,.52],[.36,.56],[.36,.59],[.35,.63],[.33,.67],[.31,.71],[.29,.75],[.27,.79],[.25,.82],[.24,.83],[.23,.80],[.22,.75],[.21,.70],[.20,.65],[.19,.60],[.19,.55],[.20,.50],[.21,.48]],
+        // Europe main
+        [[.47,.19],[.48,.17],[.50,.15],[.52,.13],[.54,.12],[.56,.13],[.56,.17],[.56,.20],[.55,.23],[.54,.25],[.53,.27],[.51,.29],[.49,.30],[.48,.29],[.47,.27],[.46,.25],[.46,.22]],
+        // Iberian
+        [[.46,.26],[.47,.25],[.48,.26],[.49,.28],[.49,.30],[.48,.32],[.47,.32],[.46,.30],[.45,.28]],
+        // Italy
+        [[.52,.27],[.53,.27],[.535,.29],[.54,.31],[.535,.33],[.53,.34],[.525,.32],[.52,.30]],
+        // Greece/Turkey
+        [[.54,.28],[.55,.27],[.56,.27],[.57,.28],[.58,.27],[.59,.28],[.58,.30],[.57,.30],[.56,.30],[.55,.29]],
+        // Scandinavia
+        [[.50,.09],[.51,.06],[.53,.05],[.54,.06],[.55,.08],[.55,.11],[.54,.12],[.52,.13],[.50,.13],[.49,.11]],
+        // UK
+        [[.47,.15],[.48,.13],[.49,.14],[.49,.18],[.48,.20],[.47,.18]],
+        // Ireland
+        [[.46,.16],[.47,.15],[.47,.18],[.46,.19],[.455,.18]],
+        // Africa
+        [[.46,.32],[.48,.30],[.50,.30],[.52,.30],[.54,.31],[.56,.31],[.58,.33],[.59,.36],[.60,.40],[.60,.44],[.59,.48],[.58,.52],[.57,.56],[.56,.60],[.55,.64],[.53,.67],[.51,.69],[.50,.70],[.48,.68],[.47,.65],[.45,.60],[.44,.55],[.43,.50],[.43,.46],[.43,.42],[.44,.38],[.45,.34]],
+        // Madagascar
+        [[.58,.61],[.59,.59],[.60,.60],[.61,.63],[.60,.67],[.59,.68],[.58,.65]],
+        // Arabian Peninsula
+        [[.57,.28],[.58,.26],[.60,.25],[.62,.26],[.64,.28],[.65,.32],[.64,.35],[.62,.37],[.60,.38],[.58,.36],[.57,.33],[.56,.30]],
+        // Asia main
+        [[.56,.14],[.58,.11],[.60,.09],[.64,.07],[.68,.05],[.72,.05],[.76,.06],[.80,.07],[.84,.09],[.87,.11],[.89,.14],[.91,.17],[.93,.20],[.93,.23],[.91,.25],[.89,.27],[.87,.28],[.85,.30],[.83,.32],[.81,.33],[.79,.35],[.77,.37],[.75,.38],[.73,.37],[.71,.35],[.69,.36],[.67,.38],[.65,.37],[.63,.35],[.61,.32],[.60,.28],[.58,.24],[.57,.20],[.56,.17]],
+        // India
+        [[.67,.32],[.69,.30],[.71,.30],[.73,.31],[.74,.34],[.74,.38],[.73,.42],[.72,.45],[.70,.47],[.69,.45],[.68,.42],[.67,.38],[.66,.35]],
+        // Sri Lanka
+        [[.71,.48],[.72,.47],[.73,.48],[.72,.50],[.71,.50]],
+        // Indochina
+        [[.79,.34],[.80,.32],[.82,.33],[.83,.36],[.82,.39],[.81,.42],[.79,.44],[.78,.42],[.77,.39],[.77,.36]],
+        // Malay Peninsula
+        [[.79,.44],[.80,.43],[.81,.46],[.80,.50],[.79,.50],[.78,.47]],
+        // Korea
+        [[.86,.25],[.87,.23],[.88,.25],[.88,.29],[.87,.31],[.86,.29]],
+        // Japan (Honshu/Hokkaido)
+        [[.89,.19],[.90,.17],[.91,.18],[.92,.20],[.92,.24],[.91,.27],[.90,.29],[.89,.28],[.89,.24],[.89,.21]],
+        // Japan (Kyushu)
+        [[.88,.29],[.89,.28],[.90,.30],[.89,.32],[.88,.31]],
+        // Sumatra
+        [[.78,.52],[.80,.50],[.82,.52],[.81,.55],[.79,.56],[.78,.54]],
+        // Borneo
+        [[.82,.52],[.84,.50],[.86,.52],[.85,.55],[.83,.56],[.82,.54]],
+        // Java
+        [[.79,.56],[.81,.55],[.83,.56],[.82,.58],[.80,.58],[.79,.57]],
+        // Sulawesi
+        [[.84,.54],[.85,.52],[.86,.54],[.85,.56],[.84,.56]],
+        // Papua
+        [[.88,.54],[.90,.52],[.92,.52],[.93,.54],[.92,.56],[.90,.56],[.88,.55]],
+        // Philippines
+        [[.84,.38],[.85,.36],[.86,.38],[.87,.40],[.86,.44],[.85,.44],[.84,.42],[.84,.40]],
+        // Taiwan
+        [[.85,.32],[.86,.31],[.87,.33],[.86,.35],[.85,.34]],
+        // Australia
+        [[.84,.58],[.86,.56],[.89,.55],[.92,.57],[.94,.59],[.95,.62],[.96,.66],[.95,.70],[.93,.73],[.90,.74],[.87,.73],[.85,.71],[.83,.68],[.82,.64],[.82,.60]],
+        // Tasmania
+        [[.91,.76],[.92,.75],[.93,.76],[.93,.78],[.92,.79],[.91,.78]],
+        // New Zealand North
+        [[.96,.67],[.97,.65],[.97,.68],[.96,.70],[.96,.69]],
+        // New Zealand South
+        [[.96,.70],[.97,.69],[.97,.73],[.96,.76],[.95,.74],[.96,.72]],
+    ];
+
+    for(const pts of P) poly(pts);
+
+    const id=c.getImageData(0,0,sw,sh), bm=[];
+    for(let r=0;r<rows;r++){const row=[];for(let cl=0;cl<cols;cl++){
+        let f=0;for(let dy=0;dy<S;dy++)for(let dx=0;dx<S;dx++){if(id.data[((r*S+dy)*sw+cl*S+dx)*4+3]>60)f++}
+        row.push(f>S*S*.2);
+    }bm.push(row)}
+    return bm;
+}
+
+function preAngles(co,ro){const cx=co/2,cy=ro/2,o=[];for(let r=0;r<ro;r++){const w=[];for(let c=0;c<co;c++)w.push(Math.atan2(r-cy,c-cx));o.push(w)}return o}
+function preDists(co,ro){const cx=co/2,cy=ro/2,mx=Math.sqrt(cx*cx+cy*cy),o=[];for(let r=0;r<ro;r++){const w=[];for(let c=0;c<co;c++){const dx=c-cx,dy=r-cy;w.push(Math.sqrt(dx*dx+dy*dy)/mx)}o.push(w)}return o}
+function ringXY(a,w,h,d){const rx=(w/2-CELL*2)*(.88+d*.10),ry=(h/2-CELL*2)*(.88+d*.10);return[w/2+rx*Math.cos(a),h/2+ry*Math.sin(a)]}
+function totalRot(p){let r=0;for(const m of[PH.M01,PH.M12,PH.M2M])if(p>m[0])r+=clamp((p-m[0])/(m[1]-m[0]),0,1)*Math.PI*2;return r}
+
+/* ── Renders ── */
+function drawReveal(G,bm,rp){
+    const{ctx,w,h,cols,rows}=G;
+    if(!G.pat)G.pat=gridPat(ctx);
+    ctx.fillStyle='#000';ctx.fillRect(0,0,w,h);
+    ctx.fillStyle=G.pat;ctx.fillRect(0,0,w,h);
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+        if(!bm[r][c])continue;
+        const dl=(r/rows)*.7,fp=clamp((rp-dl)/.20,0,1);if(fp<=0)continue;
+        const x=c*CELL+GAP,y=r*CELL+GAP;
+        if(fp>=1){ctx.fillStyle='#fff';ctx.fillRect(x,y,SQ,SQ)}
+        else{const sx=fp<.5?1-fp*2:(fp-.5)*2,sw=SQ*sx,ox=(SQ-sw)/2,br=fp<.5?30:Math.floor(80+175*((fp-.5)*2));ctx.fillStyle=`rgb(${br},${br},${br})`;ctx.fillRect(x+ox,y,sw,SQ)}
+    }
+}
+
+function drawHold(G,bm,alpha){
+    const{ctx,w,h,cols,rows}=G;
+    if(!G.pat)G.pat=gridPat(ctx);
+    ctx.fillStyle='#000';ctx.fillRect(0,0,w,h);
+    ctx.fillStyle=G.pat;ctx.fillRect(0,0,w,h);
+    ctx.globalAlpha=alpha||1;ctx.fillStyle='#fff';
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(bm[r][c])ctx.fillRect(c*CELL+GAP,r*CELL+GAP,SQ,SQ);
+    ctx.globalAlpha=1;
+}
+
+function drawMorph(G,fromBM,toBM,pre,mp,rot,tgtAlpha){
+    const{ctx,w,h,cols,rows}=G;
+    if(!G.pat)G.pat=gridPat(ctx);
+    ctx.fillStyle='#000';ctx.fillRect(0,0,w,h);
+    const SCAT=.30,REF=.70;
+    const sT=easeIO(clamp(mp/SCAT,0,1));
+    const crossT=clamp((mp-SCAT)/(REF-SCAT),0,1);
+    const rT=easeIO(clamp((mp-REF)/(1-REF),0,1));
+    const tA=tgtAlpha||1;
+
+    const gA=mp<SCAT?1-sT:mp>REF?rT:0;
+    if(gA>.01){ctx.globalAlpha=gA;ctx.fillStyle=G.pat;ctx.fillRect(0,0,w,h);ctx.globalAlpha=1}
+
+    if(mp<REF){
+        const a=mp<SCAT?1:1-crossT;
+        if(a>.01){ctx.globalAlpha=a;ctx.fillStyle='#fff';
+        for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){if(!fromBM[r][c])continue;const ang=pre.ang[r][c]+rot;const[rx,ry]=ringXY(ang,w,h,pre.dist[r][c]);ctx.fillRect(lerp(c*CELL+GAP,rx,sT),lerp(r*CELL+GAP,ry,sT),SQ,SQ)}
+        ctx.globalAlpha=1}
+    }
+    if(mp>SCAT){
+        const a=(mp>REF?tA:crossT*tA);
+        if(a>.01){ctx.globalAlpha=a;ctx.fillStyle='#fff';
+        for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){if(!toBM[r][c])continue;const ang=pre.ang[r][c]+rot;const[rx,ry]=ringXY(ang,w,h,pre.dist[r][c]);ctx.fillRect(lerp(rx,c*CELL+GAP,rT),lerp(ry,r*CELL+GAP,rT),SQ,SQ)}
+        ctx.globalAlpha=1}
+    }
+}
+
+function drawScrollMap(G,bm,xOff){
+    const{ctx,w,h,cols,rows}=G;
+    ctx.fillStyle='#000';ctx.fillRect(0,0,w,h);
+    const tw=cols*CELL;
+    ctx.globalAlpha=MAP_ALPHA;ctx.fillStyle='#fff';
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+        if(!bm[r][c])continue;
+        const bx=c*CELL+GAP,y=r*CELL+GAP;
+        for(let cp=-1;cp<=1;cp++){const x=bx-xOff+cp*tw;if(x>=-SQ&&x<=w)ctx.fillRect(x,y,SQ,SQ)}
+    }
+    ctx.globalAlpha=1;
+}
+
+function render(G,BM,pre,p,xOff){
+    const rot=totalRot(p);
+    if(p<=PH.REVEAL[1])      drawReveal(G,BM[0],phP(p,PH.REVEAL));
+    else if(p<=PH.HOLD0[1])  drawHold(G,BM[0]);
+    else if(p<=PH.M01[1])    drawMorph(G,BM[0],BM[1],pre,phP(p,PH.M01),rot);
+    else if(p<=PH.HOLD1[1])  drawHold(G,BM[1]);
+    else if(p<=PH.M12[1])    drawMorph(G,BM[1],BM[2],pre,phP(p,PH.M12),rot);
+    else if(p<=PH.HOLD2[1])  drawHold(G,BM[2]);
+    else if(p<=PH.M2M[1])    drawMorph(G,BM[2],BM[3],pre,phP(p,PH.M2M),rot,MAP_ALPHA);
+    else                      drawScrollMap(G,BM[3],xOff);
+}
+
+function setupNav(){
+    const nav=document.getElementById('navbar');
+    addEventListener('scroll',()=>nav.classList.toggle('scrolled',scrollY>50),{passive:true});
+}
+
+function init(){
+    const sec=document.getElementById('hero'),cvs=document.getElementById('heroCanvas');
+    const cta=document.getElementById('heroCta'),scrl=document.getElementById('scrollIndicator');
+    let G=makeGrid(cvs);
+
+    function buildAll(){return[
+        textBM(['ALPHA CAN COME','FROM ANYONE'],G.cols,G.rows),
+        textBM(['SUBMIT YOUR','TRADE IDEA'],G.cols,G.rows),
+        textBM(['GET A BOUNTY'],G.cols,G.rows),
+        mapBM(G.cols,G.rows),
+    ]}
+    function buildPre(){return{ang:preAngles(G.cols,G.rows),dist:preDists(G.cols,G.rows)}}
+
+    let BM=buildAll(),pre=buildPre();
+    let ctaEntryTs=null, prevInCta=false;
+
+    function frame(ts){
+        const p=getSP(sec);
+        const inCta=p>PH.M2M[1];
+        if(inCta&&!prevInCta) ctaEntryTs=ts;
+        if(!inCta) ctaEntryTs=null;
+        prevInCta=inCta;
+        const xOff=ctaEntryTs?((((ts-ctaEntryTs)/1000*25)%(G.cols*CELL))+G.cols*CELL)%(G.cols*CELL):0;
+        render(G,BM,pre,p,xOff);
+        if(cta)cta.classList.toggle('visible',p>=PH.CTA[0]);
+        if(scrl)scrl.classList.toggle('hidden',scrollY>100);
+        requestAnimationFrame(frame);
+    }
+
+    addEventListener('resize',(()=>{let t;return()=>{clearTimeout(t);t=setTimeout(()=>{G=makeGrid(cvs);G.pat=null;BM=buildAll();pre=buildPre()},150)}})());
+
+    // pixel scroll indicator
+    const sCvs=document.getElementById('scrollCanvas');
+    if(sCvs){
+        const P=3, SZ=P*1.1|0, GP=Math.max(1,P*0.15|0);
+        const CELL_S=SZ+GP;
+        // 5x5 pixel font for S C R O L L + down arrow
+        const FONT={
+            S:[[1,1,1],[1,0,0],[1,1,1],[0,0,1],[1,1,1]],
+            C:[[1,1,1],[1,0,0],[1,0,0],[1,0,0],[1,1,1]],
+            R:[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,0,1]],
+            O:[[1,1,1],[1,0,1],[1,0,1],[1,0,1],[1,1,1]],
+            L:[[1,0,0],[1,0,0],[1,0,0],[1,0,0],[1,1,1]],
+        };
+        const WORD='SCROLL';
+        const charW=3, charH=5, charGap=1;
+        const totalCols=WORD.length*(charW+charGap)-charGap;
+        const arrowRows=[
+            [0,1,1,1,1,1,1,1,0],
+            [0,0,1,1,1,1,1,0,0],
+            [0,0,0,1,1,1,0,0,0],
+            [0,0,0,0,1,0,0,0,0],
+        ];
+        const arrowW=9, arrowH=4, arrowGap=2;
+        const fullW=Math.max(totalCols,arrowW);
+        const fullH=charH+arrowGap+arrowH;
+        const textOffX=Math.floor((fullW-totalCols)/2);
+        const arrowOffX=Math.floor((fullW-arrowW)/2);
+
+        const dpr=devicePixelRatio||1;
+        const cW=fullW*CELL_S, cH=(charH+arrowGap+arrowH+6)*CELL_S;
+        sCvs.width=cW*dpr; sCvs.height=cH*dpr;
+        sCvs.style.width=cW+'px'; sCvs.style.height=cH+'px';
+        const sCtx=sCvs.getContext('2d');
+        sCtx.scale(dpr,dpr);
+
+        const TRAIL=6;
+        const arrowBaseY=(charH+arrowGap)*CELL_S;
+        const loopH=arrowH+TRAIL;
+
+        function drawScrollPixels(ts){
+            sCtx.clearRect(0,0,cW,cH);
+            const alpha=0.45;
+            sCtx.fillStyle=`rgba(255,255,255,${alpha})`;
+            for(let ci=0;ci<WORD.length;ci++){
+                const ch=FONT[WORD[ci]];
+                const ox=textOffX+ci*(charW+charGap);
+                for(let r=0;r<charH;r++) for(let c=0;c<charW;c++){
+                    if(!ch[r][c]) continue;
+                    sCtx.fillRect((ox+c)*CELL_S, r*CELL_S, SZ, SZ);
+                }
+            }
+            const shift=((ts/400)%loopH)|0;
+            for(let r=0;r<arrowH;r++) for(let c=0;c<arrowW;c++){
+                if(!arrowRows[r][c]) continue;
+                const dr=(r+shift)%loopH;
+                if(dr>=arrowH+TRAIL) continue;
+                const fade=dr<arrowH?1:1-(dr-arrowH+1)/(TRAIL+1);
+                sCtx.fillStyle=`rgba(255,255,255,${alpha*fade})`;
+                sCtx.fillRect((arrowOffX+c)*CELL_S, arrowBaseY+dr*CELL_S, SZ, SZ);
+            }
+        }
+
+        function scrollFrame(ts){
+            if(scrl&&!scrl.classList.contains('hidden')) drawScrollPixels(ts);
+            requestAnimationFrame(scrollFrame);
+        }
+        requestAnimationFrame(scrollFrame);
+    }
+
+    requestAnimationFrame(frame);
+    setupNav();
+}
+
+document.fonts&&document.fonts.ready?document.fonts.ready.then(init):addEventListener('load',init);
+</script>
+</body>
+</html>
