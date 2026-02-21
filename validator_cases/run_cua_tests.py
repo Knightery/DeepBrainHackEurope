@@ -108,9 +108,13 @@ def _assertions(result: dict) -> tuple[bool, list[str]]:
 
     status = str(result.get("status", "")).lower()
     checks.append(f"status={status}")
-    if status not in {"ok", "warn", "fail"}:
+    allow_warn = os.getenv("CUA_TEST_ALLOW_WARN", "0").strip().lower() in {"1", "true", "yes", "on"}
+    allowed_statuses = {"ok", "warn"} if allow_warn else {"ok"}
+    if status not in allowed_statuses:
         passed = False
-        checks.append("invalid status from data_fetcher output")
+        checks.append(
+            f"unexpected status from data_fetcher output (expected one of {sorted(allowed_statuses)})"
+        )
 
     artifacts = result.get("artifacts", {}) if isinstance(result.get("artifacts"), dict) else {}
     attempts = artifacts.get("attempt_history", []) if isinstance(artifacts.get("attempt_history"), list) else []
@@ -119,8 +123,20 @@ def _assertions(result: dict) -> tuple[bool, list[str]]:
         passed = False
         checks.append("no CUA attempt history captured")
 
+    downloaded = artifacts.get("downloaded_files", []) if isinstance(artifacts.get("downloaded_files"), list) else []
+    checks.append(f"downloaded_files={len(downloaded)}")
+    if len(downloaded) == 0:
+        passed = False
+        checks.append("CUA did not download any source artifacts")
+
     staged_reference = str(artifacts.get("staged_reference", "")).strip().lower()
     match_review = artifacts.get("match_review", {}) if isinstance(artifacts.get("match_review"), dict) else {}
+    verdict = str(match_review.get("verdict", "")).strip().lower()
+    checks.append(f"match_verdict={verdict or '(missing)'}")
+    if verdict != "match":
+        passed = False
+        checks.append("match_review verdict is not 'match'")
+
     best_candidate = str(match_review.get("best_candidate", "")).strip().lower()
     if staged_reference and best_candidate and best_candidate == staged_reference:
         passed = False

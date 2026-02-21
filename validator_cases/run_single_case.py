@@ -13,8 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-from pitch_engine import evaluate_pitch
-from run_validator_cases import build_cases, summarize
+from run_validator_cases import build_cases, evaluate_case, summarize
 
 
 def main() -> int:
@@ -31,7 +30,7 @@ def main() -> int:
         return 1
 
     print(f"\n=== Running {case.pitch_id} ===")
-    result = evaluate_pitch(case)
+    result = evaluate_case(case)
     print(json.dumps(summarize(result.to_dict()), indent=2))
     return 0
 

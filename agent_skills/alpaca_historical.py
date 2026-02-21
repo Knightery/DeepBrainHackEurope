@@ -10,12 +10,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-try:
-    from dotenv import load_dotenv
+from dotenv import load_dotenv
 
-    load_dotenv()
-except Exception:
-    pass
+load_dotenv()
 
 DEFAULT_DATA_BASE_URL = "https://data.alpaca.markets"
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -233,20 +230,24 @@ def fetch_alpaca_historical_bars(params: dict[str, Any]) -> dict[str, Any]:
         }
     except HTTPError as exc:
         message = f"Alpaca HTTP error {exc.code}."
+        parse_error = ""
         try:
             raw = exc.read().decode("utf-8", errors="replace")
             parsed = json.loads(raw)
             detail = parsed.get("message") if isinstance(parsed, dict) else ""
             if detail:
                 message = f"{message} {detail}"
-        except Exception:
-            pass
+        except Exception as parse_exc:
+            parse_error = f"{parse_exc.__class__.__name__}: {parse_exc}"
+        artifacts: dict[str, Any] = {"error_type": "http_error", "status_code": exc.code}
+        if parse_error:
+            artifacts["detail_parse_error"] = parse_error
         return {
             "skill": skill_name,
             "status": "fail",
             "summary": message,
             "bars": [],
-            "artifacts": {"error_type": "http_error", "status_code": exc.code},
+            "artifacts": artifacts,
         }
     except URLError as exc:
         return {

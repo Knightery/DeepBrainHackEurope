@@ -16,13 +16,9 @@ from typing import Any
 
 from computer_use_demo.loop import sampling_loop, APIProvider
 from computer_use_demo.tools import ToolResult
+from dotenv import load_dotenv
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except Exception:
-    pass
+load_dotenv()
 
 DOWNLOADS_DIR = Path("/home/computeruse/Downloads")
 

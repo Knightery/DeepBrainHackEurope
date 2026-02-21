@@ -43,23 +43,47 @@ DATA_ROOT = Path("data/pitches")
 
 SYSTEM_PROMPT = """
 You are the Clarifier Agent for a quant pitch intake flow.
+You are interviewer-led: you control the flow and actively test the pitch for weaknesses.
+
 Your goals:
 1) Help the user produce a clear investment thesis.
 2) Confirm target stock tickers and time horizon.
 3) Request source URLs when missing.
 4) Remind the user to upload their strategy files (.py or .ipynb) and/or price data (.csv) if not yet attached.
-5) Keep responses short and practical.
+5) Keep and show a practical checklist of required submissions:
+   - thesis
+   - time_horizon (days|weeks|months|years)
+   - tickers
+   - at least one uploaded strategy/signal file
+   - source_urls only when supporting data files are submitted
+   - supporting data files only when needed for the strategy or evidence
+6) Ask probing, high-signal follow-up questions to find holes in assumptions, evidence quality, implementation realism, and risk controls.
+7) Act autonomously: once enough information is available, trigger the next pipeline actions yourself without asking the user for approval.
+8) Keep responses concise, practical, and direct.
 
-At the end of every response, include one XML block with JSON:
-<pitch_state>{"thesis": "...", "time_horizon": "days|weeks|months|years|null", "tickers": [], "source_urls": [], "methodology_summary": "...", "one_shot_mode": false, "ready_for_evaluation": false}</pitch_state>
+At the end of every response, include these XML blocks with strict JSON:
+<pitch_state>{"thesis": "...", "time_horizon": "days|weeks|months|years|null", "tickers": [], "source_urls": [], "one_shot_mode": false, "ready_for_evaluation": false}</pitch_state>
+<orchestrator_actions>{"actions":[{"action":"run_evaluate|run_backtest|run_validate_data","file_name":"optional","notes":"optional","reason":"short reason"}]}</orchestrator_actions>
 
 Rules:
 - If you are uncertain about a field, return the current best value or empty string.
 - `tickers` must always be a JSON array of stock tickers (e.g., ["AAPL", "MSFT"]).
 - `source_urls` must always be a JSON array.
 - Keep conversational text before the XML block.
-- Do not include extra XML blocks.
-- Do NOT require methodology_summary — it is optional. Focus on thesis, tickers, time_horizon, source_urls, and file uploads.
+- Include exactly one `<pitch_state>` block and exactly one `<orchestrator_actions>` block.
+- If no action is needed, return: `<orchestrator_actions>{"actions":[]}</orchestrator_actions>`.
+- You may emit multiple actions in one turn when it improves workflow; order them as they should run.
+- Evaluate-only flow: do not reference or request `/validate`.
+- Intake is ready when ALL are true:
+  a) thesis is present,
+  b) time_horizon is present,
+  c) tickers has at least one symbol,
+  d) at least one strategy/signal file is uploaded,
+  e) if supporting data files exist, source_urls must be present.
+- If supporting data files exist and source URLs are present, emit one `run_validate_data` action per relevant file with `file_name`.
+- A backtest is mandatory before any submission to final review for non-one-shot strategies.
+- For non-one-shot strategies, emit `run_backtest` before `run_evaluate` whenever final-review submission is the intent.
+- The agent may submit to final review at any time by emitting `run_evaluate` when it judges evidence is sufficient.
 """.strip()
 
 COMMANDS_TEXT = """
@@ -68,7 +92,6 @@ Optional commands:
 - `/checklist` show onboarding checklist
 - `/oneshot on|off|status` explicitly toggle one-shot validation mode
 - `/evaluate` run validation and scoring
-- `/validate` re-run the validation loop after clarifications
 - `/backtest` run Claude backtest agent on uploaded strategy script (.py or .ipynb)
 - `/validate_data "file_to_validate" "notes"` run CUA data-source validation for one uploaded file
 - `/reset` start a new pitch
@@ -245,10 +268,41 @@ def _local_clarifier_reply(draft: PitchDraft) -> str:
     return f"I captured your latest details. Next: {prompt_map.get(first_missing, first_missing)}"
 
 
-async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> str:
+def _extract_orchestrator_actions(raw_text: str) -> list[dict[str, str]]:
+    parsed = extract_tagged_json(raw_text, "orchestrator_actions")
+    if not isinstance(parsed, dict):
+        return []
+    actions = parsed.get("actions")
+    if not isinstance(actions, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    allowed = {"run_evaluate", "run_backtest", "run_validate_data"}
+    for item in actions:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip()
+        if action not in allowed:
+            continue
+        entry: dict[str, str] = {"action": action}
+        file_name = item.get("file_name")
+        notes = item.get("notes")
+        reason = item.get("reason")
+        if isinstance(file_name, str) and file_name.strip():
+            entry["file_name"] = file_name.strip()
+        if isinstance(notes, str) and notes.strip():
+            entry["notes"] = notes.strip()
+        if isinstance(reason, str) and reason.strip():
+            entry["reason"] = reason.strip()
+        normalized.append(entry)
+
+    return normalized[:8]
+
+
+async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> tuple[str, list[dict[str, str]]]:
     client = _get_client()
     if client is None:
-        return _local_clarifier_reply(draft)
+        raise RuntimeError("GEMINI_API_KEY is not set. Clarifier cannot run without Gemini.")
 
     context = draft.to_llm_context()
     context["validation_context"] = _session_validation_context()
@@ -262,38 +316,31 @@ async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> str:
         f"RECENT_TURNS=\n{history_text}"
     )
 
-    try:
-        async with cl.Step(name="Clarifier Agent", type="llm") as step:
-            step.input = f"Analyzing user input and extracting pitch fields..."
-            response = await cl.make_async(client.models.generate_content)(
-                model=_gemini_model(),
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    max_output_tokens=700,
-                    system_instruction=SYSTEM_PROMPT,
-                ),
-            )
-            raw_text = (getattr(response, "text", "") or "").strip()
-            extracted = extract_tagged_json(raw_text, "pitch_state")
-            if extracted:
-                draft.merge_structured_update(extracted)
-                step.output = f"Extracted fields: {json.dumps(extracted, indent=2)}"
-            else:
-                step.output = "No structured fields extracted this turn."
-
-        assistant_text = strip_tagged_json(raw_text, "pitch_state") or _local_clarifier_reply(draft)
-        history.append({"role": "assistant", "content": assistant_text})
-        _set_session_history(history)
-        return assistant_text
-    except Exception as exc:
-        fallback = (
-            "Gemini call failed for this turn, so I used local intake mode. "
-            f"Error: {exc.__class__.__name__}"
+    async with cl.Step(name="Clarifier Agent", type="llm") as step:
+        step.input = f"Analyzing user input and extracting pitch fields..."
+        response = await cl.make_async(client.models.generate_content)(
+            model=_gemini_model(),
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=10000,
+                system_instruction=SYSTEM_PROMPT,
+            ),
         )
-        history.append({"role": "assistant", "content": fallback})
-        _set_session_history(history)
-        return f"{fallback}\n\n{_local_clarifier_reply(draft)}"
+        raw_text = (getattr(response, "text", "") or "").strip()
+        extracted = extract_tagged_json(raw_text, "pitch_state")
+        if extracted:
+            draft.merge_structured_update(extracted)
+            step.output = f"Extracted fields: {json.dumps(extracted, indent=2)}"
+        else:
+            step.output = "No structured fields extracted this turn."
+
+    actions = _extract_orchestrator_actions(raw_text)
+    text_wo_state = strip_tagged_json(raw_text, "pitch_state")
+    assistant_text = strip_tagged_json(text_wo_state, "orchestrator_actions") or _local_clarifier_reply(draft)
+    history.append({"role": "assistant", "content": assistant_text})
+    _set_session_history(history)
+    return assistant_text, actions
 
 
 def _copy_to_pitch_uploads(draft: PitchDraft, src_path: Path, original_name: str, mime_type: str, size: int) -> UploadedFile:
@@ -348,7 +395,7 @@ def _ingest_message_files(draft: PitchDraft, message: cl.Message) -> list[str]:
 
 
 def _files_requiring_cua(draft: PitchDraft) -> list[UploadedFile]:
-    roles = _detect_file_roles(draft.uploaded_files)
+    roles = _detect_file_roles(draft.uploaded_files, tickers=draft.tickers, thesis=draft.thesis)
     candidates = roles["data_files"] + roles["benchmark_files"]
     if candidates:
         # Keep deterministic order and avoid duplicates by file_id.
@@ -588,7 +635,7 @@ def _validation_followup_markdown(summary: str, questions: list[str]) -> str:
         lines.append("- Please clarify the following:")
         for idx, question in enumerate(questions, start=1):
             lines.append(f"  {idx}. {question}")
-    lines.append("- After updates, run `/validate` to re-run this loop.")
+    lines.append("- After updates, run `/evaluate` to re-run this loop.")
     return "\n".join(lines)
 
 
@@ -675,7 +722,7 @@ def _render_score_card(result: Any) -> str:
     """Build a markdown score card for the final evaluation result."""
     scoring = result.agent_outputs.get("scoring", {})
     artifacts = scoring.get("artifacts", {})
-    source = artifacts.get("source", "csv_approximation")
+    source = artifacts.get("source", "strategy_scorer_unavailable")
     one_shot_mode = bool(artifacts.get("one_shot_mode"))
     one_shot_recommendation = artifacts.get("one_shot_recommendation")
 
@@ -734,7 +781,7 @@ def _render_score_card(result: Any) -> str:
                 lines.append(f"- `{comp.get('category', '?')}` **{label}**: `[{bar}]` `{raw:.2f}` (w={comp.get('weight', 0)})")
             lines.append("")
 
-    # CSV-based scoring breakdown
+    # Core scoring diagnostics
     if not one_shot_mode:
         lines.extend([
         "### Scoring Breakdown",
@@ -806,8 +853,9 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
         await task_list.send()
         await cl.Message(
             content=(
-                "Evaluation failed because validator agents could not run.\n"
-                "Please ensure `GEMINI_API_KEY` is configured and retry."
+                "Evaluation failed because an LLM-dependent agent call did not complete.\n"
+                f"Error: `{exc.__class__.__name__}: {exc}`\n"
+                "Please correct the issue and run `/evaluate`."
             ),
             author="Orchestrator",
         ).send()
@@ -876,7 +924,12 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
 
     if result.validation_outcome == "needs_clarification":
         context_items = _session_validation_context()
-        context_items.append(result.validation_summary)
+        # Store summary + all pending questions so the Clarifier can address them conversationally.
+        context_entry = result.validation_summary
+        if result.validation_questions:
+            qs = " | ".join(result.validation_questions)
+            context_entry = f"{result.validation_summary} | Pending questions: {qs}"
+        context_items.append(context_entry)
         _set_session_validation_context(context_items)
         await cl.Message(
             content=_validation_followup_markdown(result.validation_summary, result.validation_questions),
@@ -927,7 +980,7 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         ).send()
         return
 
-    roles = _detect_file_roles(draft.uploaded_files)
+    roles = _detect_file_roles(draft.uploaded_files, tickers=draft.tickers, thesis=draft.thesis)
     if not roles["strategy_scripts"]:
         await cl.Message(
             content=(
@@ -955,11 +1008,22 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
             return
 
     _data_files: list[tuple[str, str]] = []
+    data_read_errors: list[str] = []
     for _f in roles["data_files"] + roles["benchmark_files"]:
         try:
             _data_files.append((_f.name, Path(_f.path).read_text(encoding="utf-8", errors="replace")))
-        except Exception:
-            pass
+        except Exception as exc:
+            data_read_errors.append(f"{_f.name}: {type(exc).__name__}: {exc}")
+    if data_read_errors:
+        details = "\n".join(f"- {item}" for item in data_read_errors)
+        await cl.Message(
+            content=(
+                "Could not read one or more data files for backtest execution.\n"
+                f"{details}"
+            ),
+            author="Backtest Agent",
+        ).send()
+        return
 
     await cl.Message(
         content=(
@@ -1045,7 +1109,7 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
             content=(
                 f"## Could Not Complete\n\n"
                 f"{result.message}\n\n"
-                "The evaluation will fall back to CSV-based scoring when you run `/evaluate`."
+                "Evaluation requires strategy_scorer output. Please resolve the backtest issue, then run `/evaluate` again."
             ),
             author="Backtest Agent",
         ).send()
@@ -1125,6 +1189,45 @@ async def _handle_oneshot_command(draft: PitchDraft, content: str) -> None:
     await cl.Message(content=f"One-shot mode is currently `{draft.one_shot_mode}`.").send()
 
 
+async def _execute_orchestrator_actions(draft: PitchDraft, actions: list[dict[str, str]]) -> bool:
+    handled = False
+    for entry in actions:
+        action = entry.get("action", "")
+        reason = entry.get("reason", "").strip() or "Clarifier requested this pipeline step."
+
+        if action == "run_backtest":
+            handled = True
+            await cl.Message(content=f"Clarifier action: running backtest. ({reason})", author="Orchestrator").send()
+            await _handle_backtest_command(draft)
+            continue
+
+        if action == "run_validate_data":
+            handled = True
+            file_name = (entry.get("file_name") or "").strip()
+            if not file_name:
+                await cl.Message(
+                    content="Clarifier requested `/validate_data`, but no `file_name` was provided.",
+                    author="Orchestrator",
+                ).send()
+                continue
+            notes = (entry.get("notes") or "").strip()
+            quoted_notes = f' "{notes}"' if notes else ""
+            await cl.Message(
+                content=f"Clarifier action: validating data file `{file_name}`. ({reason})",
+                author="Orchestrator",
+            ).send()
+            await _handle_validate_data_command(draft, f'/validate_data "{file_name}"{quoted_notes}')
+            continue
+
+        if action == "run_evaluate":
+            handled = True
+            await cl.Message(content=f"Clarifier action: running `/evaluate`. ({reason})", author="Orchestrator").send()
+            await _handle_evaluate_command(draft, "/evaluate")
+            continue
+
+    return handled
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1133,6 +1236,33 @@ async def on_chat_start() -> None:
     _set_session_history([])
     _set_session_validation_context([])
     _set_session_data_fetcher_output(None)
+
+    # --- Onboarding step 1: strategy type ---
+    type_res = await cl.AskActionMessage(
+        content="**Step 1 of 2 — Pitch type**\n\nIs this a recurring strategy or a single one-shot trade?",
+        actions=[
+            cl.Action(name="strategy", payload={"value": "strategy"}, label="📈 Recurring strategy"),
+            cl.Action(name="one_shot", payload={"value": "one_shot"}, label="⚡ One-shot trade"),
+        ],
+        timeout=300,
+    ).send()
+    if type_res and type_res.get("payload", {}).get("value") == "one_shot":
+        draft.one_shot_mode = True
+
+    # --- Onboarding step 2: time horizon ---
+    horizon_res = await cl.AskActionMessage(
+        content="**Step 2 of 2 — Time horizon**\n\nWhat is the expected holding period?",
+        actions=[
+            cl.Action(name="days", payload={"value": "days"}, label="Days (intraday – 1 week)"),
+            cl.Action(name="weeks", payload={"value": "weeks"}, label="Weeks (1 – 8 weeks)"),
+            cl.Action(name="months", payload={"value": "months"}, label="Months (2 – 12 months)"),
+            cl.Action(name="years", payload={"value": "years"}, label="Years (1 year+)"),
+        ],
+        timeout=300,
+    ).send()
+    if horizon_res:
+        draft.time_horizon = horizon_res.get("payload", {}).get("value") or None
+
     _save_pitch_snapshot(draft)
 
     greeting = (
@@ -1157,9 +1287,7 @@ async def on_chat_start() -> None:
     await cl.Message(content=greeting, author="Orchestrator").send()
     await cl.Message(content=_checklist_markdown(draft)).send()
     if _get_client() is None:
-        await cl.Message(
-            content="`GEMINI_API_KEY` is not detected. Running in local clarifier mode only."
-        ).send()
+        raise RuntimeError("GEMINI_API_KEY is not set. Startup failed because clarifier requires Gemini.")
 
 
 @cl.on_message
@@ -1193,7 +1321,7 @@ async def on_message(message: cl.Message) -> None:
             await _handle_evaluate_command(draft, "/evaluate")
             return
         if command == "/validate":
-            await _handle_evaluate_command(draft, "/validate")
+            await cl.Message(content="`/validate` was removed. Use `/evaluate`.").send()
             return
         if command == "/backtest":
             await _handle_backtest_command(draft)
@@ -1223,9 +1351,28 @@ async def on_message(message: cl.Message) -> None:
         elif "one_shot_mode=false" in lowered or "one-shot mode off" in lowered:
             draft.one_shot_mode = False
 
+    clarifier_actions: list[dict[str, str]] = []
     if content:
-        assistant_reply = await _run_clarifier_turn(draft, content)
-        _append_chat_event(draft, "assistant", assistant_reply)
+        try:
+            assistant_reply, clarifier_actions = await _run_clarifier_turn(draft, content)
+            _append_chat_event(draft, "assistant", assistant_reply)
+        except Exception as exc:
+            draft.status = "failed"
+            _save_pitch_snapshot(draft)
+            _append_chat_event(
+                draft,
+                "system",
+                f"Clarifier failure: {exc.__class__.__name__}: {exc}",
+            )
+            await cl.Message(
+                content=(
+                    "Clarifier failed because the Gemini call did not complete.\n"
+                    f"Error: `{exc.__class__.__name__}: {exc}`\n"
+                    "Fix the issue and resend your message."
+                ),
+                author="Clarifier Agent",
+            ).send()
+            return
     else:
         assistant_reply = _local_clarifier_reply(draft)
 
@@ -1235,8 +1382,10 @@ async def on_message(message: cl.Message) -> None:
     _save_pitch_snapshot(draft)
     await cl.Message(content=f"{assistant_reply}\n\n{_checklist_markdown(draft)}", author="Clarifier Agent").send()
 
+    actions_handled = await _execute_orchestrator_actions(draft, clarifier_actions) if clarifier_actions else False
+
     # ChatGPT-style orchestration: auto-advance into evaluation once intake is complete.
-    if draft.ready_for_evaluation() and draft.status in {"ready", "needs_clarification"}:
+    if not actions_handled and draft.ready_for_evaluation() and draft.status in {"ready", "needs_clarification"}:
         await cl.Message(
             content="Intake is complete. Running full anti-scam validation and evaluation now.",
             author="Orchestrator",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import math
+import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,8 +28,9 @@ def _as_float(value: Any, default: float | None = None) -> float | None:
     return parsed
 
 
-def _read_tables(uploaded_files: list[Any]) -> dict[str, pd.DataFrame]:
+def _read_tables(uploaded_files: list[Any]) -> tuple[dict[str, pd.DataFrame], list[str]]:
     tables: dict[str, pd.DataFrame] = {}
+    read_errors: list[str] = []
     for file_entry in uploaded_files:
         path = Path(getattr(file_entry, "path", ""))
         suffix = path.suffix.lower()
@@ -38,12 +41,13 @@ def _read_tables(uploaded_files: list[Any]) -> dict[str, pd.DataFrame]:
         try:
             sep = "\t" if suffix == ".tsv" else ","
             frame = pd.read_csv(path, sep=sep)
-        except Exception:
+        except Exception as exc:
+            read_errors.append(f"{path.name}: {exc.__class__.__name__}: {exc}")
             continue
         if frame.empty:
             continue
         tables[path.name.lower()] = frame
-    return tables
+    return tables, read_errors
 
 
 def _pick_series(frame: pd.DataFrame, candidates: tuple[str, ...]) -> pd.Series | None:
@@ -118,30 +122,302 @@ def _parse_token_from_text(text: str, key: str) -> str | None:
     return match.group(1).strip().lower()
 
 
+# ---------------------------------------------------------------------------
+# LLM Extraction Agent
+# ---------------------------------------------------------------------------
+
+def _gemini_model() -> str:
+    return os.getenv("GEMINI_MODEL", "gemini-2.5-pro-preview-03-25")
+
+
+ONE_SHOT_EXTRACTOR_PROMPT = """
+You are the One-Shot Strategy Extraction Agent for a quant pitch evaluation pipeline.
+
+Your sole job: extract structured inputs needed for statistical validation of a one-shot
+event-driven strategy from the user's free-form thesis, methodology description, and the
+actual column names and sample rows of every uploaded CSV/TSV file.
+
+## 1. Event type — infer from content, never require a magic keyword
+
+Choose ONE of:
+- "causal_chain": a causal mechanism connects a driver variable to an asset return
+  (e.g. drought -> wheat price rises -> McDonald's input costs rise -> stock underperforms).
+  Needs Nodes 1, 2, 3, 4.
+- "binary_event": a discrete catalyst (earnings surprise, FDA decision, regulatory ruling,
+  product launch) where the user models a probability vs. market-implied probability.
+  Needs Nodes 2, 4.
+- "deal_spread": merger/acquisition arbitrage — user models deal close probability vs.
+  market-implied break-even price. Needs Node 2 and deal pricing inputs.
+
+## 2. Column mapping — use actual file content
+
+Map uploaded CSV/TSV columns to semantic roles. Use both column names AND sample values:
+- "driver":        independent/causal variable that precedes the return (crop yield,
+                   rainfall index, macro indicator, sentiment score, any leading factor)
+- "asset_return":  realized returns or price changes of the target asset
+- "severity":      magnitude/intensity of historical driver episodes (for Node 3 OLS)
+- "magnitude":     price change corresponding to each historical episode (for Node 3 OLS)
+- "forecast_prob": probability forecasts — values should be in [0, 1]
+- "outcome":       binary realized outcome — values should be 0 or 1
+
+Return null for a role that is not needed for the inferred event type, or that is absent
+from all files. Return null rather than guessing — false positives cause wrong statistics.
+
+## 3. Numeric parameter extraction — handle free-form text
+
+Extract from methodology_summary using semantic understanding, not just regex:
+- "I believe there is a 65% chance" -> p_true = 0.65
+- "market implies around 50%" -> p_market = 0.50
+- "upside ~120%" or "payoff if correct is 1.2x" -> payoff_up = 1.2
+- "downside risk is -30%" -> payoff_down = -0.30
+- "I'll assume 1% transaction costs" -> transaction_cost = 0.01
+- For deal_spread: extract p_close, current_price, price_if_close, price_if_break
+
+Set a param to null if you cannot determine it with reasonable confidence.
+
+## 4. Questions — specific, actionable, plain English
+
+For each role or param you cannot determine, produce one focused question.
+- Bad:  "Please provide probability inputs."
+- Good: "What probability do you assign to the event occurring, and what does the market
+  currently imply? (e.g. 'I think there is a 65% chance, market implies around 50%')"
+
+## Output — strict JSON only
+
+{
+  "event_type": "causal_chain|binary_event|deal_spread",
+  "event_type_reasoning": "one short sentence",
+  "column_mappings": {
+    "driver":        {"file": "name.csv", "column": "col_name", "confidence": 0.9},
+    "asset_return":  {"file": "name.csv", "column": "col_name", "confidence": 0.9},
+    "severity":      null,
+    "magnitude":     null,
+    "forecast_prob": {"file": "name.csv", "column": "col_name", "confidence": 0.9},
+    "outcome":       {"file": "name.csv", "column": "col_name", "confidence": 0.9}
+  },
+  "numeric_params": {
+    "p_true": null, "p_market": null,
+    "payoff_up": null, "payoff_down": null, "transaction_cost": 0.0,
+    "p_close": null, "current_price": null,
+    "price_if_close": null, "price_if_break": null
+  },
+  "extraction_questions": [],
+  "extraction_confidence": 0.0
+}
+""".strip()
+
+
+@dataclass
+class OneShotExtractionResult:
+    """Structured output of the LLM extraction agent."""
+    event_type: str = "causal_chain"
+    event_type_reasoning: str = ""
+    column_mappings: dict = field(default_factory=dict)
+    numeric_params: dict = field(default_factory=dict)
+    extraction_questions: list = field(default_factory=list)
+    extraction_confidence: float = 0.0
+    extraction_latency_ms: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Extraction helpers
+# ---------------------------------------------------------------------------
+
+def _profile_uploaded_csvs(uploaded_files: list[Any], max_rows: int = 5) -> list[dict[str, Any]]:
+    """Build {name, row_count, columns, sample_rows} profiles for the LLM extractor payload."""
+    profiles: list[dict[str, Any]] = []
+    for file_entry in uploaded_files:
+        path = Path(getattr(file_entry, "path", ""))
+        suffix = path.suffix.lower()
+        if suffix not in {".csv", ".tsv"}:
+            continue
+        if not path.exists():
+            continue
+        try:
+            sep = "\t" if suffix == ".tsv" else ","
+            frame = __import__("pandas").read_csv(path, sep=sep)
+            if frame.empty:
+                continue
+            profiles.append({
+                "name": path.name,
+                "row_count": len(frame),
+                "columns": list(frame.columns),
+                "sample_rows": frame.head(max_rows).fillna("").to_dict(orient="records"),
+            })
+        except Exception as exc:
+            profiles.append(
+                {
+                    "name": path.name,
+                    "row_count": 0,
+                    "columns": [],
+                    "sample_rows": [],
+                    "profile_error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+    return profiles
+
+
+def _extract_one_shot_params(draft: Any) -> OneShotExtractionResult:
+    """Run the Gemini extraction agent to parse event type, column roles, and numeric params.
+
+    Raises RuntimeError if GEMINI_API_KEY is not set or google-genai is not installed.
+    Re-raises any API exception so callers are aware of failures.
+    """
+    started = time.monotonic()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY environment variable is not set. "
+            "Gemini extraction is required for one-shot validation."
+        )
+
+    try:
+        from google import genai  # noqa: PLC0415
+        from google.genai import types  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "google-genai package is not installed. "
+            "Install it with: pip install google-genai"
+        ) from exc
+
+    file_profiles = _profile_uploaded_csvs(getattr(draft, "uploaded_files", []))
+    payload = {
+        "thesis": getattr(draft, "thesis", "") or "",
+        "tickers": getattr(draft, "tickers", []) or [],
+        "source_urls": getattr(draft, "source_urls", []) or [],
+        "methodology_summary": getattr(draft, "methodology_summary", "") or "",
+        "files": file_profiles,
+    }
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=_gemini_model(),
+        contents=json.dumps(payload, ensure_ascii=True),
+        config=types.GenerateContentConfig(
+            temperature=0.1,
+            max_output_tokens=10000,
+            system_instruction=ONE_SHOT_EXTRACTOR_PROMPT,
+            response_mime_type="application/json",
+        ),
+    )
+    raw = (getattr(response, "text", "") or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+    parsed = json.loads(raw)
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+
+    event_type = str(parsed.get("event_type", "causal_chain")).strip().lower()
+    if event_type not in {"causal_chain", "binary_event", "deal_spread"}:
+        event_type = "causal_chain"
+
+    col_mappings = parsed.get("column_mappings", {})
+    if not isinstance(col_mappings, dict):
+        col_mappings = {}
+
+    raw_params = parsed.get("numeric_params", {})
+    if not isinstance(raw_params, dict):
+        raw_params = {}
+    cleaned_params: dict[str, Any] = {}
+    for key in (
+        "p_true", "p_market", "payoff_up", "payoff_down", "transaction_cost",
+        "p_close", "current_price", "price_if_close", "price_if_break",
+    ):
+        cleaned_params[key] = _as_float(raw_params.get(key))
+
+    questions = parsed.get("extraction_questions", [])
+    if not isinstance(questions, list):
+        questions = []
+    questions = [str(q) for q in questions if q]
+
+    return OneShotExtractionResult(
+        event_type=event_type,
+        event_type_reasoning=str(parsed.get("event_type_reasoning", "")),
+        column_mappings=col_mappings,
+        numeric_params=cleaned_params,
+        extraction_questions=questions,
+        extraction_confidence=_clamp(float(parsed.get("extraction_confidence", 0.5))),
+        extraction_latency_ms=latency_ms,
+    )
+
+
+# ---------------------------------------------------------------------------
+# LLM-aware series resolution helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_mapped_series(
+    tables: dict[str, Any],
+    mapping: dict[str, Any] | None,
+) -> "pd.Series | None":
+    """Resolve one LLM column mapping to a numeric Series. Returns None if mapping absent or column not found."""
+    if not mapping or not isinstance(mapping, dict):
+        return None
+    file_name = str(mapping.get("file", "")).strip().lower()
+    col_name = str(mapping.get("column", "")).strip()
+    if not file_name or not col_name:
+        return None
+    frame = tables.get(file_name)
+    if frame is None:
+        return None
+    lower_map = {c.lower(): c for c in frame.columns}
+    actual_col = lower_map.get(col_name.lower())
+    if actual_col is None:
+        return None
+    values = pd.to_numeric(frame[actual_col], errors="coerce").dropna()
+    return values.reset_index(drop=True) if len(values) > 0 else None
+
+
+def _find_pair_with_fallback(
+    tables: dict[str, Any],
+    left_mapping: dict[str, Any] | None,
+    right_mapping: dict[str, Any] | None,
+) -> "tuple[pd.Series | None, pd.Series | None]":
+    """Resolve a paired series from LLM column mappings. Returns (None, None) if either can't be resolved."""
+    left = _resolve_mapped_series(tables, left_mapping)
+    right = _resolve_mapped_series(tables, right_mapping)
+    if left is None or right is None:
+        return None, None
+    n = min(len(left), len(right))
+    return left.iloc[:n].reset_index(drop=True), right.iloc[:n].reset_index(drop=True)
+
+
+def _resolve_numeric(
+    extraction: OneShotExtractionResult,
+    key: str,
+    confidence_threshold: float = 0.6,
+) -> float | None:
+    """Return LLM-extracted numeric value, or None if below confidence threshold or key absent."""
+    if extraction.extraction_confidence < confidence_threshold:
+        return None
+    return extraction.numeric_params.get(key)
+
+
 def _run_node2_forecast_calibration(
     tables: dict[str, pd.DataFrame],
+    extraction: OneShotExtractionResult,
     flags: list[dict[str, str]],
     questions: list[str],
     missing_inputs: list[str],
 ) -> dict[str, Any]:
-    forecast, outcome = _find_table_with_columns(
+    col_maps = extraction.column_mappings
+    forecast, outcome = _find_pair_with_fallback(
         tables,
-        ("forecast_prob", "probability", "p_forecast", "forecast"),
-        ("outcome", "event", "observed", "label"),
+        col_maps.get("forecast_prob"),
+        col_maps.get("outcome"),
     )
-    node2 = {"node": "forecast_calibration", "pass": False, "details": {}}
+    node2: dict[str, Any] = {"node": "forecast_calibration", "pass": False, "details": {}}
     if forecast is None or outcome is None or min(len(forecast), len(outcome)) < 20:
         missing_inputs.append("node2_forecast_history")
         questions.append(
-            "Upload forecast calibration history with `forecast_prob` and binary `outcome` columns "
-            "(minimum 20 rows; 30+ preferred)."
+            "Please upload a forecast calibration history CSV with at least 20 rows. "
+            "The file should have one column of probability estimates (values between 0 and 1) "
+            "and one column of binary realized outcomes (0 or 1). "
+            "Column names can be anything — the system will identify them automatically."
         )
-        flags.append(
-            {
-                "code": "ONE_SHOT_NODE2_INPUT_MISSING",
-                "message": "Missing or insufficient forecast calibration history for Node 2.",
-            }
-        )
+        flags.append({
+            "code": "ONE_SHOT_NODE2_INPUT_MISSING",
+            "message": "Missing or insufficient forecast calibration history for Node 2.",
+        })
         return node2
 
     n = min(len(forecast), len(outcome))
@@ -184,46 +460,62 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
     flags: list[dict[str, str]] = []
     questions: list[str] = []
     missing_inputs: list[str] = []
+    fallback_inputs_used: list[str] = []
     criteria: list[dict[str, Any]] = []
 
-    tables = _read_tables(draft.uploaded_files)
-    method_text = draft.methodology_summary or ""
-    variant = _parse_token_from_text(method_text, "one_shot_event_type") or "causal_chain"
-    if variant not in {"causal_chain", "binary_event", "deal_spread"}:
+    # ── Phase 0: LLM Extraction ──────────────────────────────────────────────
+    # Gemini reads thesis, methodology, tickers, and actual CSV column profiles to
+    # infer event type, map columns to semantic roles, and extract numeric params
+    # from free-form text. Raises RuntimeError if GEMINI_API_KEY is not set.
+    extraction = _extract_one_shot_params(draft)
+    # Surface LLM-generated questions that aren't already covered by node checks below
+    questions.extend(extraction.extraction_questions)
+
+    tables, table_read_errors = _read_tables(getattr(draft, "uploaded_files", []))
+    if table_read_errors:
         flags.append(
             {
-                "code": "ONE_SHOT_EVENT_TYPE_UNKNOWN",
-                "message": f"Unknown one-shot event type '{variant}'. Falling back to 'causal_chain'.",
+                "code": "ONE_SHOT_TABLE_READ_ERROR",
+                "message": "Some uploaded CSV/TSV files could not be parsed: " + "; ".join(table_read_errors),
             }
         )
+    col_maps = extraction.column_mappings
+
+    variant = extraction.event_type
+    if variant not in {"causal_chain", "binary_event", "deal_spread"}:
+        flags.append({
+            "code": "ONE_SHOT_EVENT_TYPE_UNKNOWN",
+            "message": f"Unknown one-shot event type '{variant}'. Falling back to 'causal_chain'.",
+        })
         variant = "causal_chain"
 
-    # Node 1 + Node 3 are specific to causal-chain setups.
     beta = 0.0
     beta_std = 0.15
     node1_n = 0
-    node2 = _run_node2_forecast_calibration(tables, flags, questions, missing_inputs)
+
+    # ── Node 2: Forecast Calibration ─────────────────────────────────────────
+    node2 = _run_node2_forecast_calibration(tables, extraction, flags, questions, missing_inputs)
     criteria.append(node2)
 
     if variant == "causal_chain":
-        x, y = _find_table_with_columns(
+        # ── Node 1: Causal Relationship ──────────────────────────────────────
+        x, y = _find_pair_with_fallback(
             tables,
-            ("wheat_price", "driver_value", "variable_a", "x", "factor"),
-            ("mcd_return", "asset_return", "target_return", "y", "response"),
+            col_maps.get("driver"),
+            col_maps.get("asset_return"),
         )
-        node1 = {"node": "causal_relationship", "pass": False, "details": {}}
+        node1: dict[str, Any] = {"node": "causal_relationship", "pass": False, "details": {}}
         if x is None or y is None or min(len(x), len(y)) < 30:
             missing_inputs.append("node1_relationship_series")
             questions.append(
-                "Upload one CSV with at least 30 rows containing both driver and asset-return columns "
-                "(for example `wheat_price` and `mcd_return`)."
+                "Please upload a CSV with at least 30 rows containing your causal driver series "
+                "and the target asset return series side-by-side. "
+                "Column names can be anything — the system will identify them automatically."
             )
-            flags.append(
-                {
-                    "code": "ONE_SHOT_NODE1_INPUT_MISSING",
-                    "message": "Missing or insufficient relationship time series for Node 1 (minimum 30 rows).",
-                }
-            )
+            flags.append({
+                "code": "ONE_SHOT_NODE1_INPUT_MISSING",
+                "message": "Missing or insufficient relationship time series for Node 1 (minimum 30 rows).",
+            })
             node1_n = int(min(len(x), len(y))) if (x is not None and y is not None) else 0
             node1["details"] = {"n": node1_n}
         else:
@@ -249,32 +541,30 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
                 "sign_stable": bool(sign_stable),
             }
             if not passed:
-                flags.append(
-                    {
-                        "code": "ONE_SHOT_NODE1_WEAK_RELATIONSHIP",
-                        "message": "Node 1 failed significance/stability checks (requires p<0.05 and stable positive OOS relationship).",
-                    }
-                )
+                flags.append({
+                    "code": "ONE_SHOT_NODE1_WEAK_RELATIONSHIP",
+                    "message": "Node 1 failed significance/stability checks (requires p<0.05 and stable positive OOS relationship).",
+                })
         criteria.append(node1)
 
-        severity, change = _find_table_with_columns(
+        # ── Node 3: Magnitude Estimate ────────────────────────────────────────
+        severity, change = _find_pair_with_fallback(
             tables,
-            ("drought_severity", "severity", "x_magnitude", "driver_magnitude"),
-            ("wheat_change", "price_change", "magnitude_change", "delta_price"),
+            col_maps.get("severity"),
+            col_maps.get("magnitude"),
         )
-        node3 = {"node": "magnitude_estimate", "pass": False, "details": {}}
+        node3: dict[str, Any] = {"node": "magnitude_estimate", "pass": False, "details": {}}
         if severity is None or change is None or min(len(severity), len(change)) < 8:
             missing_inputs.append("node3_magnitude_history")
             questions.append(
-                "Upload historical magnitude data with severity and resulting price-change columns "
-                "(minimum 8 episodes)."
+                "Please upload a CSV with at least 8 historical episodes showing the intensity "
+                "of the driver event alongside the resulting price change. "
+                "Column names can be anything — the system will identify them automatically."
             )
-            flags.append(
-                {
-                    "code": "ONE_SHOT_NODE3_INPUT_MISSING",
-                    "message": "Missing or insufficient magnitude history for Node 3.",
-                }
-            )
+            flags.append({
+                "code": "ONE_SHOT_NODE3_INPUT_MISSING",
+                "message": "Missing or insufficient magnitude history for Node 3.",
+            })
         else:
             n3 = min(len(severity), len(change))
             x_arr = severity.iloc[:n3].to_numpy(dtype=float)
@@ -284,12 +574,10 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             ssx = float(np.sum((x_arr - x_mean) ** 2))
             if ssx <= 1e-12:
                 ci_low, ci_high = -math.inf, math.inf
-                flags.append(
-                    {
-                        "code": "ONE_SHOT_NODE3_DEGENERATE_INPUT",
-                        "message": "Node 3 severity input has near-zero variance; cannot estimate slope reliably.",
-                    }
-                )
+                flags.append({
+                    "code": "ONE_SHOT_NODE3_DEGENERATE_INPUT",
+                    "message": "Node 3 severity input has near-zero variance; cannot estimate slope reliably.",
+                })
             else:
                 beta = float(np.sum((x_arr - x_mean) * (y_arr - y_mean)) / ssx)
                 alpha = y_mean - beta * x_mean
@@ -308,50 +596,59 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
                 "ci95_high": round(ci_high, 6),
             }
             if not passed:
-                flags.append(
-                    {
-                        "code": "ONE_SHOT_NODE3_CI_INCLUDES_ZERO",
-                        "message": "Node 3 failed magnitude significance (95% CI lower bound must be > 0).",
-                    }
-                )
+                flags.append({
+                    "code": "ONE_SHOT_NODE3_CI_INCLUDES_ZERO",
+                    "message": "Node 3 failed magnitude significance (95% CI lower bound must be > 0).",
+                })
         criteria.append(node3)
 
-    # Node 4: market mispricing inputs
-    p_true = _parse_numeric_from_text(method_text, "p_true")
-    p_market = _parse_numeric_from_text(method_text, "p_market")
-    payoff_up = _parse_numeric_from_text(method_text, "payoff_up")
-    payoff_down = _parse_numeric_from_text(method_text, "payoff_down")
-    transaction_cost = _parse_numeric_from_text(method_text, "transaction_cost")
+    # ── Node 4: Market Mispricing ────────────────────────────────────────────
+    p_true = _resolve_numeric(extraction, "p_true")
+    p_market = _resolve_numeric(extraction, "p_market")
+    payoff_up = _resolve_numeric(extraction, "payoff_up")
+    payoff_down = _resolve_numeric(extraction, "payoff_down")
+    transaction_cost = _resolve_numeric(extraction, "transaction_cost")
     if transaction_cost is None:
+        fallback_inputs_used.append("transaction_cost")
         transaction_cost = 0.0
 
     if variant == "deal_spread":
-        p_close = _parse_numeric_from_text(method_text, "p_close")
-        current_price = _parse_numeric_from_text(method_text, "current_price")
-        price_if_close = _parse_numeric_from_text(method_text, "price_if_close")
-        price_if_break = _parse_numeric_from_text(method_text, "price_if_break")
-        node4 = {"node": "deal_spread_pricing", "pass": False, "details": {}}
+        p_close = _resolve_numeric(extraction, "p_close")
+        current_price = _resolve_numeric(extraction, "current_price")
+        price_if_close = _resolve_numeric(extraction, "price_if_close")
+        price_if_break = _resolve_numeric(extraction, "price_if_break")
+        node4: dict[str, Any] = {"node": "deal_spread_pricing", "pass": False, "details": {}}
         if p_close is None or current_price is None or price_if_close is None or price_if_break is None:
             missing_inputs.append("deal_pricing_inputs")
             questions.append(
-                "For `one_shot_event_type=deal_spread`, include: "
-                "`p_close=..., current_price=..., price_if_close=..., price_if_break=..., transaction_cost=...`."
+                "For a deal-spread strategy, please provide: your probability of the deal "
+                "closing, the current market price, the expected price if it closes, and the "
+                "expected price if it breaks. You can write these conversationally — for example: "
+                "'I think there is a 75% chance the deal closes. Stock is at $45, acquisition "
+                "price is $55, break price is around $35.'"
             )
-            flags.append(
-                {
-                    "code": "ONE_SHOT_DEAL_INPUT_MISSING",
-                    "message": "Missing deal-spread inputs required for pricing edge.",
-                }
-            )
-            p_close = p_close if p_close is not None else 0.5
-            current_price = current_price if current_price is not None else 1.0
-            price_if_close = price_if_close if price_if_close is not None else current_price
-            price_if_break = price_if_break if price_if_break is not None else current_price
+            flags.append({
+                "code": "ONE_SHOT_DEAL_INPUT_MISSING",
+                "message": "Missing deal-spread inputs required for pricing edge.",
+            })
+            if p_close is None:
+                fallback_inputs_used.append("p_close")
+                p_close = 0.5
+            if current_price is None:
+                fallback_inputs_used.append("current_price")
+                current_price = 1.0
+            if price_if_close is None:
+                fallback_inputs_used.append("price_if_close")
+                price_if_close = current_price
+            if price_if_break is None:
+                fallback_inputs_used.append("price_if_break")
+                price_if_break = current_price
         p_true = _clamp(float(p_close))
         denom = float(price_if_close - price_if_break)
         if abs(denom) > 1e-12:
             p_market = _clamp((float(current_price) - float(price_if_break)) / denom)
         else:
+            fallback_inputs_used.append("deal_market_implied_probability")
             p_market = 0.5
         delta_p = float(p_true - p_market)
         node4["pass"] = bool(delta_p >= 0.05)
@@ -365,30 +662,36 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             "transaction_cost": round(float(transaction_cost or 0.0), 6),
         }
         if not node4["pass"]:
-            flags.append(
-                {
-                    "code": "ONE_SHOT_DEAL_WEAK_EDGE",
-                    "message": "Deal-spread mispricing edge is weak (requires model probability gap >= 5pp).",
-                }
-            )
+            flags.append({
+                "code": "ONE_SHOT_DEAL_WEAK_EDGE",
+                "message": "Deal-spread mispricing edge is weak (requires model probability gap >= 5pp).",
+            })
     else:
         node4 = {"node": "market_mispricing", "pass": False, "details": {}}
         if p_true is None or p_market is None or payoff_up is None or payoff_down is None:
             missing_inputs.append("node4_market_inputs")
             questions.append(
-                "Add one-shot market inputs in methodology text: "
-                "`p_true=0.60, p_market=0.50, payoff_up=1.0, payoff_down=-1.0, transaction_cost=0.02`."
+                "What probability do you assign to the event occurring, and what does the market "
+                "currently imply? Also, what is the upside return if correct and the downside if wrong? "
+                "For example: 'I think there is a 65% chance, market implies 50%, "
+                "upside is +120%, downside is -30%.' You do not need to use any special format."
             )
-            flags.append(
-                {
-                    "code": "ONE_SHOT_NODE4_INPUT_MISSING",
-                    "message": "Missing market-implied probability and payoff assumptions for Node 4.",
-                }
-            )
-            p_true = p_true if p_true is not None else 0.5
-            p_market = p_market if p_market is not None else 0.5
-            payoff_up = payoff_up if payoff_up is not None else 1.0
-            payoff_down = payoff_down if payoff_down is not None else -1.0
+            flags.append({
+                "code": "ONE_SHOT_NODE4_INPUT_MISSING",
+                "message": "Missing market-implied probability and payoff assumptions for Node 4.",
+            })
+            if p_true is None:
+                fallback_inputs_used.append("p_true")
+                p_true = 0.5
+            if p_market is None:
+                fallback_inputs_used.append("p_market")
+                p_market = 0.5
+            if payoff_up is None:
+                fallback_inputs_used.append("payoff_up")
+                payoff_up = 1.0
+            if payoff_down is None:
+                fallback_inputs_used.append("payoff_down")
+                payoff_down = -1.0
         p_true = _clamp(float(p_true))
         p_market = _clamp(float(p_market))
         delta_p = float(p_true - p_market)
@@ -402,12 +705,10 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             "transaction_cost": round(float(transaction_cost or 0.0), 6),
         }
         if not node4["pass"]:
-            flags.append(
-                {
-                    "code": "ONE_SHOT_NODE4_WEAK_MISPRICING",
-                    "message": "Node 4 failed mispricing criterion (requires p_true - p_market >= 5pp).",
-                }
-            )
+            flags.append({
+                "code": "ONE_SHOT_NODE4_WEAK_MISPRICING",
+                "message": "Node 4 failed mispricing criterion (requires p_true - p_market >= 5pp).",
+            })
     criteria.append(node4)
 
     # Monte Carlo uncertainty aggregation
@@ -496,6 +797,17 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             "code": "ONE_SHOT_INPUTS_INCOMPLETE",
             "message": "One-shot inputs are incomplete; uncertainty was widened and recommendation is provisional.",
         })
+    fallback_inputs_used = list(dict.fromkeys(fallback_inputs_used))
+    if fallback_inputs_used:
+        flags.append(
+            {
+                "code": "ONE_SHOT_FALLBACK_VALUES_USED",
+                "message": (
+                    "One-shot computation used hardcoded fallback values for: "
+                    + ", ".join(fallback_inputs_used)
+                ),
+            }
+        )
 
     status = "ok" if recommendation == "VALID" else "warn"
     confidence = _clamp((pass_count / max(total, 1)) * 0.9)
@@ -515,6 +827,14 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             "recommendation": recommendation,
             "monte_carlo": criteria[-1]["details"],
             "missing_inputs": missing_inputs,
+            "fallback_inputs_used": fallback_inputs_used,
+            "extraction": {
+                "confidence": extraction.extraction_confidence,
+                "latency_ms": extraction.extraction_latency_ms,
+                "event_type_reasoning": extraction.event_type_reasoning,
+                "column_mappings": extraction.column_mappings,
+                "numeric_params": extraction.numeric_params,
+            },
         },
         latency_ms=int((time.monotonic() - started) * 1000),
         missing_inputs=missing_inputs,

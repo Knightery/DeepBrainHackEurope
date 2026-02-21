@@ -50,7 +50,7 @@ Pitch statuses:
 Rules:
 - `ready` only when mandatory checklist passes.
 - `/evaluate` must hard-block when mandatory fields are missing.
-- `/validate` re-runs validation after user clarifications.
+- `/evaluate` is also used to re-run validation after user clarifications.
 
 ## 5) Canonical Pitch Entity
 
@@ -111,7 +111,6 @@ All evaluators return:
   "flags": [
     {
       "code": "LOOKAHEAD_BIAS",
-      "severity": "low|medium|high|critical",
       "message": "string"
     }
   ],
@@ -121,6 +120,25 @@ All evaluators return:
 ```
 
 ## 8) Evaluator Responsibilities
+
+### 8.0 File Role Classifier (internal)
+Runs automatically before any evaluation to classify uploaded CSV/TSV files.
+
+Inputs:
+- Column headers and first 5 sample rows of each uploaded CSV/TSV.
+- Pitch `tickers` and `thesis` as context.
+
+Outputs:
+- `strategy_data` — main price/signal data files for the pitched strategy.
+- `benchmark` — reference market/index/macro data.
+- `other` — unclassified.
+
+Runtime contract:
+- If only one CSV/TSV is uploaded, it is always `strategy_data` (no LLM call).
+- For multiple CSVs, Gemini classifies based on content, not filename keywords.
+- Falls back to keyword heuristics if no API key is available.
+- If LLM marks everything as benchmark, all files are promoted to `strategy_data` as a safety net.
+- Classification result is used by the backtest agent and data validation logic.
 
 ### 8.1 Data Fetcher
 Inputs:
@@ -148,7 +166,7 @@ Critical examples:
 - `BASH_FALLBACK_USED`
 - `NO_NEW_DOWNLOAD`
 
-### 8.2 Data Validator
+### 8.2 Data Validator (Fabrication Detector)
 Checks:
 - parse integrity,
 - missingness and duplicates,
@@ -160,16 +178,28 @@ Runtime outcomes:
 - `needs_clarification`: emit concise issue summary + clarification questions for user loop
 - `ready_for_final_review`: no blocking concerns; proceed to final review
 
-Critical examples:
+Question generation:
+- When `verdict=unclear` or `verdict=fabrication`, the LLM populates `artifacts.questions` with
+  1-3 specific, direct questions targeting the suspicious patterns found.
+- These questions are surfaced to the user via the Orchestrator's "Validation Follow-up" message
+  and stored in `validation_context` so the Clarifier Agent can work through them conversationally
+  across subsequent chat turns.
+
+Critical flag examples:
 - `INSUFFICIENT_DATA`
 - `MISSING_PRICE_COLUMN`
 - `MISSING_TICKERS`
 
-### 8.3 Pipeline Auditor
+### 8.3 Pipeline Auditor (Coding Errors Detector)
 Checks:
 - methodology clarity and consistency,
 - leakage/overfit risk signs,
 - evidence of robust validation framing.
+
+Question generation:
+- When `verdict=errors_found`, the LLM populates `artifacts.questions` with 1-4 specific, actionable
+  questions pointing at each detected issue (e.g. rolling window anchoring, transaction cost assumptions).
+- These questions flow to the user via the same clarification loop as the Fabrication Detector.
 
 ### 8.4 Scoring
 Computes:
@@ -183,10 +213,12 @@ Computes:
 
 Triggered automatically during `/evaluate` (and manually via `/backtest`) when the user uploads a `.py` or `.ipynb` strategy file.
 
-**File role detection** (auto-classifies all uploaded files):
-- `.py`/`.ipynb` → strategy scripts
-- `.csv`/`.tsv` with `benchmark`/`market`/`index`/`spy` in name → benchmark files
-- other `.csv`/`.tsv` → price data files
+**File role detection** (LLM-powered, auto-classifies all uploaded files):
+- `.py`/`.ipynb` → strategy scripts (no LLM needed)
+- Single CSV/TSV → always `strategy_data` (no LLM needed)
+- Multiple CSV/TSVs → Gemini reads column headers + 5 sample rows for each file and classifies
+  using pitch `tickers` and `thesis` as context, producing `strategy_data` or `benchmark`.
+- Heuristic keyword fallback is used when no Gemini API key is available.
 
 **3-attempt loop per run:**
 - **Phase 1 – CREATE/FIX**: Claude (`ANTHROPIC_MODEL`) generates a self-contained Python runner that loads the user's strategy, runs it, fetches benchmark data via Alpaca REST bars with dynamic request params (including timeframe/feed/adjustment inferred from strategy/data), computes all required metrics, and prints a JSON object to stdout.
@@ -194,7 +226,7 @@ Triggered automatically during `/evaluate` (and manually via `/backtest`) when t
 - **Phase 3 – REVIEW**: Claude validates the JSON output and decides the termination verdict.
 
 **Termination statuses:**
-- `success` — all required fields present and valid; `strategy_scorer` composite replaces CSV-based scoring.
+- `success` — all required fields present and valid; `strategy_scorer` composite is used for scoring.
 - `agent_fault` — 3 attempts exhausted with self-introduced bugs; falls back to CSV scoring with a `medium` flag.
 - `user_action_required` — Claude determines the user's script is broken or missing inputs; emits a `high` flag and user-facing message.
 
@@ -206,7 +238,7 @@ overall_score = 0.65 × strategy_scorer_composite
               + 10 × match_rate
 ```
 
-`agent_outputs["scoring"]["artifacts"]["source"]` is set to `"strategy_scorer"` or `"csv_approximation"` for auditability.
+`agent_outputs["scoring"]["artifacts"]["source"]` is set to `"strategy_scorer"` (or `"one_shot"` in one-shot mode) for auditability.
 
 **Required output fields computed by the agent:**
 `backtest_start`, `backtest_end`, `cagr`, `total_return`, `volatility`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `max_drawdown`, `max_drawdown_duration`, `total_trades`, `win_rate`, `avg_win`, `avg_loss`, `profit_factor`, `expectancy`, `benchmark_cagr`, `benchmark_max_drawdown`, `benchmark_total_return`, `alpha`, `information_ratio`, `excess_return`, `up_capture`, `down_capture`.
@@ -220,25 +252,48 @@ Triggered only when the user explicitly enables one-shot mode via `/oneshot on`.
 Purpose:
 - Validate event-driven single-trade theses where repeated-trade metrics (Sharpe/win-rate) are not the primary evidence.
 
-Node checks:
+#### Phase 0 — LLM Extraction Agent
+
+Before any statistical node runs, `_extract_one_shot_params(draft)` is called. It sends the thesis, methodology summary, ticker list, and a profile of each uploaded CSV (column names + 5 sample rows) to Gemini. The model returns a JSON payload with:
+- `event_type`: inferred variant (`causal_chain`, `binary_event`, or `deal_spread`)
+- `event_type_reasoning`: short explanation
+- `column_mappings`: semantic role → `{"file": ..., "column": ...}` for each CSV column role
+- `numeric_params`: free-form text → extracted key/value pairs
+- `extraction_questions`: clarification questions if confidence is low
+- `extraction_confidence`: 0–1 float
+
+If `GEMINI_API_KEY` is absent or the call fails, `extraction_available=False` and all nodes fall back to legacy column-name heuristics and regex parsing.
+
+Extraction sub-dict is included in `OneShotResult.artifacts["extraction"]` for observability.
+
+#### Node checks
+
 - `causal_chain` (default): Node 1 + Node 2 + Node 3 + Node 4 + Monte Carlo
 - `binary_event`: Node 2 + Node 4 + Monte Carlo
 - `deal_spread`: Node 2 + deal-pricing node + Monte Carlo
 
-`one_shot_event_type` is read from methodology text:
-- `one_shot_event_type=causal_chain|binary_event|deal_spread`
+Event type is inferred by the extraction agent from the thesis. Legacy key `one_shot_event_type=...` in methodology text is still accepted as a fallback.
 
-Deal-spread node required keys:
-- `p_close`
-- `current_price`
-- `price_if_close`
-- `price_if_break`
-- optional `transaction_cost`
+#### Column resolution
 
-Decision output:
+Each statistical node calls `_find_pair_with_fallback(tables, llm_mapping_left, llm_mapping_right, legacy_candidates_left, legacy_candidates_right)`:
+1. If the LLM mapping is confident, resolve the named column from the named file.
+2. Otherwise fall back to the legacy candidate name list (e.g. `("wheat_price", "driver_value", ...)`).
+
+#### Numeric parameter resolution
+
+`_resolve_numeric(extraction, key, method_text)` resolves numeric params:
+1. Use `extraction.numeric_params[key]` if extraction is available and confidence ≥ 0.6.
+2. Fall back to `_parse_numeric_from_text(method_text, key)` (regex `key=value`).
+
+Users may write values conversationally (e.g. "I think there's a 65% chance"); the extraction agent handles parsing.
+
+#### Decision output
+
 - Binary recommendation only: `VALID` or `NOT_VALID`
 - No USD allocation is computed in one-shot mode (`allocation_usd = 0`)
-- Missing node inputs produce explicit clarification questions and widened Monte Carlo uncertainty
+- Missing node inputs produce plain-English clarification questions and widened Monte Carlo uncertainty
+- Clarification questions from Phase 0 are surfaced alongside per-node questions
 
 ## 9) Scoring & Allocation Policy (v0)
 
@@ -262,7 +317,7 @@ Allocation is forced to `0` when any critical condition occurs, including:
 - critical validator/fetcher/auditor flags.
 
 Clarification-loop rule:
-- If outcome is `needs_clarification`, allocation remains `0` until user resolves issues and passes `/validate`.
+- If outcome is `needs_clarification`, allocation remains `0` until user resolves issues and passes `/evaluate`.
 
 ### 9.3 Allocation ladder (USD)
 If not hard-rejected:
@@ -301,7 +356,7 @@ Clarifier response must expose:
 Validation loop behavior:
 - `/evaluate` runs both validation agents.
 - If non-fabrication issues exist, user gets a compact summary + follow-up questions.
-- User can answer in chat, then run `/validate` to re-run only from summarized context.
+- User can answer in chat, then run `/evaluate` to re-run only from summarized context.
 - Only concise validation summaries are fed back into the user-facing clarifier context.
 
 ## 11) Storage Layout

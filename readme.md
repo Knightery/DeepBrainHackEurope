@@ -23,19 +23,18 @@ Quant Pitch Evaluator helps strong independent quants submit stock ideas and get
    - thesis,
    - time horizon (`days`, `weeks`, `months`, `years`),
    - stock ticker(s) (just symbols like `AAPL, MSFT`),
-   - methodology summary,
-   - source URL(s) for submitted data.
-4. User uploads supporting files:
-   - **strategy script** (`.py` or `.ipynb`) — required for backtest agent scoring.
-   - **price data CSV** — used by both the backtest agent and CSV-based fallback.
-   - benchmark CSV (optional, filename must contain `benchmark`/`market`/`spy`) — auto-detected.
+   - source URL(s) when supporting data files are submitted.
+4. User uploads files:
+   - At least one strategy/signal file is required for evaluation.
+   - Preferred for backtest: **strategy script** (`.py` or `.ipynb`).
+   - Supporting data files (price/signal/benchmark CSVs) are optional.
 5. Once intake is complete, evaluation auto-runs (chat-style; commands are optional).
 6. Before scoring, CUA automatically validates every uploaded data file against submitted source URLs.
-7. User can still run `/backtest` as an optional standalone pre-check.
+7. For non-one-shot pitches, backtest is required before final review submission.
 8. For event-driven non-repeatable theses, user can use `/oneshot on` or include `one_shot_mode=true` in chat.
 9. Evaluation outcome:
    - fabricated/cheating signal -> `Goodbye.`
-   - missing/unclear validation aspects -> clarification loop and `/validate`
+   - missing/unclear validation aspects -> clarification loop and `/evaluate`
    - clean validation -> ready for final review with `Congrats!`
 7. User receives score + report + allocation recommendation once ready for final review.
 
@@ -43,7 +42,7 @@ Quant Pitch Evaluator helps strong independent quants submit stock ideas and get
 
 - Keeps onboarding simple for users.
 - Preserves minimum standardization for reliable quant evaluation.
-- Enforces data provenance (source URLs required).
+- Enforces data provenance when supporting datasets are submitted.
 - Makes missing fields explicit and actionable.
 
 ## Current app status
@@ -122,27 +121,23 @@ For single-event strategies (where Sharpe/win-rate are not meaningful), use:
 
 Then run `/evaluate`. The system returns a binary recommendation (`VALID` / `NOT_VALID`) and does not assign USD allocation.
 
-Minimum one-shot inputs:
-- Node 1 relationship history CSV (driver and asset-return columns, >=30 rows)
-- Node 2 forecast calibration CSV (`forecast_prob`, `outcome`, >=20 rows)
-- Node 3 magnitude history CSV (`drought_severity`, `wheat_change`, >=8 rows)
-- Node 4 assumptions in methodology text:
-  - `p_true=...`
-  - `p_market=...`
-  - `payoff_up=...`
-  - `payoff_down=...`
-  - optional `transaction_cost=...`
+**Write naturally — no magic keywords required.** An LLM extraction agent reads your thesis, methodology, and CSV column names/samples to automatically infer the event type, map columns to the right statistical roles, and parse numeric assumptions from free-form text (e.g. "I think there's a 65% chance the deal closes").
 
-Variant shortcuts (easiest implemented):
-- `one_shot_event_type=causal_chain` (default): uses Nodes 1-4 + Monte Carlo.
-- `one_shot_event_type=binary_event`: uses Node 2 + Node 4 + Monte Carlo (skips Nodes 1 and 3).
-- `one_shot_event_type=deal_spread`: uses Node 2 + deal-pricing node + Monte Carlo.
-  - Required methodology keys:
-    - `p_close=...`
-    - `current_price=...`
-    - `price_if_close=...`
-    - `price_if_break=...`
-    - optional `transaction_cost=...`
+Minimum one-shot inputs:
+- **Node 1** (causal chain only): CSV with ≥30 rows containing your causal driver series and the target asset return side-by-side. Column names can be anything.
+- **Node 2**: CSV with ≥20 rows of probability estimates (0–1) and binary realized outcomes (0 or 1). Column names can be anything.
+- **Node 3** (causal chain only): CSV with ≥8 historical episodes showing driver intensity and resulting price change. Column names can be anything.
+- **Node 4**: Your probability estimate, market-implied probability, and upside/downside payoffs — described conversationally in your methodology text.
+
+The event type (causal chain, binary event, or deal spread) is inferred automatically from your thesis. If extraction confidence is low, the system widens uncertainty and asks a clarifying question instead of failing silently.
+
+Event variants:
+- **causal_chain** (default): uses Nodes 1–4 + Monte Carlo.
+- **binary_event**: uses Node 2 + Node 4 + Monte Carlo (skips Nodes 1 and 3).
+- **deal_spread**: uses Node 2 + deal-pricing node + Monte Carlo.
+  - Describe the current price, acquisition/break prices, and your close probability conversationally.
+
+**Legacy key=value format still accepted** as a fallback for backward compatibility.
 
 ## Test scripts
 

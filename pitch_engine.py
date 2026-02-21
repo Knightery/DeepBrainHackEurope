@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -69,6 +68,14 @@ Fabrication checklist:
 3) Non-monotonic timestamps or signs of post-hoc data editing
 4) Data that provably does not match the declared source (e.g. ticker mismatch, wrong price range for period)
 
+Questions rule:
+- When verdict=unclear or verdict=fabrication, populate `questions` with 1-3 specific, direct questions
+  that would allow the user to resolve your uncertainty if answered honestly.
+  Examples: "Can you share the raw source file before any preprocessing?"
+           "Your prices show zero variance from 2023-01-05 to 2023-01-12 — what caused this?"
+           "The declared ticker is AAPL but the price range matches TSLA for this period — please clarify."
+- When verdict=clean, leave `questions` empty.
+
 Output — strict JSON only:
 {"summary":"...","confidence":0.0,"flags":[{"code":"...","message":"..."}],"artifacts":{"verdict":"clean|fabrication|unclear","questions":[]}}
 """.strip()
@@ -90,6 +97,15 @@ Methodology checklist:
 4) Overfitting / data snooping — hyperparameter search on the test set, too few observations for statistical significance
 5) Weak validation — no out-of-sample or walk-forward split documented
 6) Unrealistic assumptions — no transaction costs / slippage for high-frequency or daily rebalancing strategies
+
+Questions rule:
+- When verdict=errors_found, populate `questions` with 1-4 specific, actionable questions that would let
+  the user clarify or correct each detected issue.
+  Each question should point at the specific problem found, e.g.:
+  "Your rolling mean uses a window of 20 bars with no shift — is the window anchored to the current bar
+   or the previous bar at prediction time?"
+  "No transaction cost assumption is documented for a daily rebalancing strategy — what cost did you assume?"
+- When verdict=clean, leave `questions` empty.
 
 Output — strict JSON only:
 {"summary":"...","confidence":0.0,"flags":[{"code":"...","message":"..."}],"artifacts":{"verdict":"clean|errors_found","questions":[]}}
@@ -121,19 +137,12 @@ def round_to_100(value: float) -> int:
 
 
 def normalize_time_horizon(raw_value: str | None) -> str | None:
+    """Accept only exact canonical values. Time horizon is set via UI selection, not free text."""
     if not raw_value:
         return None
     text = raw_value.strip().lower()
     if text in TIME_HORIZON_VALUES:
         return text
-    if "day" in text:
-        return "days"
-    if "week" in text:
-        return "weeks"
-    if "month" in text:
-        return "months"
-    if "year" in text or "annual" in text or "long" in text:
-        return "years"
     return None
 
 
@@ -321,9 +330,7 @@ def heuristic_update_from_user_text(draft: PitchDraft, text: str) -> None:
     if tickers:
         draft.tickers = sorted(set(draft.tickers + tickers))
 
-    horizon = normalize_time_horizon(text)
-    if horizon and not draft.time_horizon:
-        draft.time_horizon = horizon
+    # Time horizon is set via UI selection on chat start — do not infer from free text.
 
     lowered = text.lower()
     if not draft.thesis and len(text.strip()) > 30:
@@ -418,32 +425,119 @@ def _match_rate(draft: PitchDraft) -> float:
     return 0.0
 
 
-def _detect_file_roles(uploaded_files: list[UploadedFile]) -> dict[str, list[UploadedFile]]:
-    """
-    Classify uploaded files into roles for the evaluation pipeline.
+_FILE_ROLE_CLASSIFIER_PROMPT = """
+You are classifying uploaded files for a quant strategy pitch evaluation pipeline.
 
-    Returns:
-        {
-            "strategy_scripts": [.py/.ipynb files],
-            "data_files":        [.csv/.tsv non-benchmark files],
-            "benchmark_files":   [.csv/.tsv with 'benchmark'/'market'/etc in name],
+You will receive a JSON payload with:
+- "tickers": the strategy's target tickers
+- "thesis": the investment thesis
+- "files": a list of file profiles, each with "name", "columns", and "sample_rows"
+
+Classify each file into exactly one role:
+- "strategy_data": main price/returns/signal data for the strategy being pitched
+- "benchmark": reference or comparison data (market index, SPY, risk-free, macro series)
+- "other": unrecognised or irrelevant files
+
+Classification rules:
+- Files whose columns or sample values relate to the pitched tickers or thesis are strategy_data.
+- Files with purely index/market/macro data, or whose name/columns suggest a reference series
+  (e.g. spy, spx, index, benchmark, rf, macro, vix, treasury) are benchmark.
+- When ambiguous, prefer strategy_data over benchmark.
+- strategy_data files typically contain: close, open, high, low, volume, price, return, signal
+  for the assets described in the thesis.
+
+Output strict JSON only:
+{"files": [{"name": "...", "role": "strategy_data|benchmark|other", "reason": "..."}]}
+""".strip()
+
+
+def _profile_csv_file(file_entry: UploadedFile, max_rows: int = 5) -> dict[str, Any]:
+    """Read column names and a few sample rows from a CSV/TSV for LLM classification."""
+    try:
+        path = Path(file_entry.path)
+        sep = "\t" if path.suffix.lower() == ".tsv" else ","
+        frame = pd.read_csv(path, sep=sep, nrows=max_rows)
+        return {
+            "name": file_entry.name,
+            "columns": list(frame.columns),
+            "sample_rows": frame.head(max_rows).fillna("").to_dict(orient="records"),
         }
+    except Exception as exc:
+        return {
+            "name": file_entry.name,
+            "columns": [],
+            "sample_rows": [],
+            "profile_error": f"{exc.__class__.__name__}: {exc}",
+        }
+
+
+def _detect_file_roles(
+    uploaded_files: list[UploadedFile],
+    tickers: list[str] | None = None,
+    thesis: str | None = None,
+) -> dict[str, list[UploadedFile]]:
     """
-    strategy_scripts: list[UploadedFile] = []
+    LLM-powered file role detection. Reads actual file content (column headers +
+    sample rows) and uses Gemini with pitch context to classify each CSV/TSV.
+    """
+    if not uploaded_files:
+        return {"strategy_scripts": [], "data_files": [], "benchmark_files": []}
+
+    # Scripts are unambiguous — classify them immediately without an LLM call.
+    strategy_scripts = [f for f in uploaded_files if Path(f.path).suffix.lower() in {".py", ".ipynb"}]
+    csv_files = [f for f in uploaded_files if Path(f.path).suffix.lower() in {".csv", ".tsv"}]
+
+    if not csv_files:
+        return {"strategy_scripts": strategy_scripts, "data_files": [], "benchmark_files": []}
+
+    # If only one CSV/TSV, no LLM needed — it must be strategy data.
+    if len(csv_files) == 1:
+        return {"strategy_scripts": strategy_scripts, "data_files": csv_files, "benchmark_files": []}
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is required for file-role classification.")
+
+    profiles = [_profile_csv_file(f) for f in csv_files]
+    payload = {
+        "tickers": tickers or [],
+        "thesis": thesis or "",
+        "files": profiles,
+    }
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=_gemini_model(),
+        contents=json.dumps(payload, ensure_ascii=True),
+        config=types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=10000,
+            system_instruction=_FILE_ROLE_CLASSIFIER_PROMPT,
+        ),
+    )
+    raw = (getattr(response, "text", "") or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+    parsed = json.loads(raw)
+    classifications: dict[str, str] = {
+        item["name"]: item["role"]
+        for item in parsed.get("files", [])
+        if isinstance(item, dict) and "name" in item and "role" in item
+    }
+
     data_files: list[UploadedFile] = []
     benchmark_files: list[UploadedFile] = []
+    for f in csv_files:
+        role = classifications.get(f.name, "strategy_data")
+        if role == "benchmark":
+            benchmark_files.append(f)
+        else:
+            data_files.append(f)
 
-    for f in uploaded_files:
-        suffix = Path(f.path).suffix.lower()
-        name_lower = f.name.lower()
-
-        if suffix in {".py", ".ipynb"}:
-            strategy_scripts.append(f)
-        elif suffix in {".csv", ".tsv"}:
-            if any(kw in name_lower for kw in ("benchmark", "market", "index", "spy", "bm_")):
-                benchmark_files.append(f)
-            else:
-                data_files.append(f)
+    # Safety: if the LLM classified everything as benchmark, promote all to data.
+    if not data_files:
+        data_files = benchmark_files
+        benchmark_files = []
 
     return {
         "strategy_scripts": strategy_scripts,
@@ -553,8 +647,8 @@ def _safe_head_records(frame: pd.DataFrame | None, limit: int = 25) -> list[dict
     try:
         json_text = frame.head(limit).to_json(orient="records", date_format="iso")
         return json.loads(json_text)
-    except Exception:
-        return []
+    except Exception as exc:
+        return [{"_error": f"{exc.__class__.__name__}: {exc}"}]
 
 
 def _series_stats(series: pd.Series) -> dict[str, float]:
@@ -703,54 +797,6 @@ def _resolve_downloaded_host_paths(downloaded_files: list[str], excluded_filenam
     return resolved
 
 
-def _fallback_match_review(reference_path: Path, candidate_paths: list[Path]) -> dict[str, Any]:
-    if not candidate_paths:
-        return {
-            "verdict": "mismatch",
-            "confidence": 0.15,
-            "best_candidate": "",
-            "reason": "No candidate files were downloaded.",
-            "retry_guidance": "Find an explicit download/export control and retry from the source page.",
-        }
-
-    ref_suffix = reference_path.suffix.lower()
-    best_candidate = candidate_paths[0]
-    best_score = 0.0
-    best_reason = ""
-
-    for candidate in candidate_paths:
-        score = 0.2
-        if candidate.suffix.lower() == ref_suffix:
-            score += 0.35
-
-        if ref_suffix in {".csv", ".tsv"} and candidate.suffix.lower() in {".csv", ".tsv"}:
-            try:
-                ref_sep = "\t" if ref_suffix == ".tsv" else ","
-                cand_sep = "\t" if candidate.suffix.lower() == ".tsv" else ","
-                ref_cols = set(pd.read_csv(reference_path, sep=ref_sep, nrows=1).columns.str.lower())
-                cand_cols = set(pd.read_csv(candidate, sep=cand_sep, nrows=1).columns.str.lower())
-                if ref_cols and cand_cols:
-                    overlap = len(ref_cols.intersection(cand_cols)) / max(len(ref_cols), 1)
-                    score += min(0.45, overlap)
-                    best_reason = f"Column overlap ratio={overlap:.2f}."
-            except Exception:
-                pass
-
-        if score > best_score:
-            best_score = score
-            best_candidate = candidate
-
-    verdict = "match" if best_score >= 0.70 else ("unclear" if best_score >= 0.45 else "mismatch")
-    reason = best_reason or f"Heuristic score={best_score:.2f} for {best_candidate.name}."
-    return {
-        "verdict": verdict,
-        "confidence": clamp(best_score),
-        "best_candidate": best_candidate.name,
-        "reason": reason,
-        "retry_guidance": "Downloaded file does not look close enough; continue searching for a closer source export.",
-    }
-
-
 def _review_download_match_with_llm(
     reference_path: Path,
     candidate_paths: list[Path],
@@ -758,7 +804,7 @@ def _review_download_match_with_llm(
 ) -> dict[str, Any]:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
-        return _fallback_match_review(reference_path, candidate_paths)
+        raise RuntimeError("GEMINI_API_KEY is required for download match review.")
 
     reference_profile = _reference_file_brief(reference_path, "")
     candidate_profiles: list[dict[str, str]] = []
@@ -787,39 +833,72 @@ def _review_download_match_with_llm(
         "\"retry_guidance\":\"...\"}</download_match>"
     )
 
+    attempts_raw = os.getenv("CUA_MATCH_REVIEW_MAX_ATTEMPTS", "3")
+    delay_raw = os.getenv("CUA_MATCH_REVIEW_RETRY_DELAY_SECONDS", "1.0")
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=_gemini_model(),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=500,
-            ),
-        )
-        raw_text = (getattr(response, "text", "") or "").strip()
-        parsed = extract_tagged_json(raw_text, "download_match")
-        if not parsed:
-            return _fallback_match_review(reference_path, candidate_paths)
+        max_attempts = max(1, min(5, int(attempts_raw)))
+    except ValueError:
+        max_attempts = 3
+    try:
+        base_delay = max(0.0, min(20.0, float(delay_raw)))
+    except ValueError:
+        base_delay = 1.0
 
-        verdict = str(parsed.get("verdict", "unclear")).strip().lower()
-        if verdict not in {"match", "mismatch", "unclear"}:
-            verdict = "unclear"
-        confidence = clamp(parsed.get("confidence", 0.5))
-        best_candidate = str(parsed.get("best_candidate", "")).strip()
-        reason = str(parsed.get("reason", "")).strip() or "LLM did not provide a reason."
-        retry_guidance = str(parsed.get("retry_guidance", "")).strip() or (
-            "Find a different source download that better matches schema/entities/date range."
+    client = genai.Client(api_key=api_key)
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model=_gemini_model(),
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=10000,
+                ),
+            )
+            raw_text = (getattr(response, "text", "") or "").strip()
+            parsed = extract_tagged_json(raw_text, "download_match")
+            if not parsed:
+                raise ValueError("Download match review model returned an invalid response.")
+
+            verdict = str(parsed.get("verdict", "unclear")).strip().lower()
+            if verdict not in {"match", "mismatch", "unclear"}:
+                verdict = "unclear"
+            confidence = clamp(parsed.get("confidence", 0.5))
+            best_candidate = str(parsed.get("best_candidate", "")).strip()
+            reason = str(parsed.get("reason", "")).strip() or "LLM did not provide a reason."
+            retry_guidance = str(parsed.get("retry_guidance", "")).strip() or (
+                "Find a different source download that better matches schema/entities/date range."
+            )
+            return {
+                "verdict": verdict,
+                "confidence": confidence,
+                "best_candidate": best_candidate,
+                "reason": reason,
+                "retry_guidance": retry_guidance,
+            }
+        except Exception as exc:  # pragma: no cover - runtime/network dependent
+            last_exc = exc
+            if attempt >= max_attempts:
+                break
+            time.sleep(base_delay * (2 ** (attempt - 1)))
+
+    reason = "LLM match review failed after retries."
+    if last_exc is not None:
+        reason = (
+            f"LLM match review failed after {max_attempts} attempt(s): "
+            f"{last_exc.__class__.__name__}: {last_exc}"
         )
-        return {
-            "verdict": verdict,
-            "confidence": confidence,
-            "best_candidate": best_candidate,
-            "reason": reason,
-            "retry_guidance": retry_guidance,
-        }
-    except Exception:
-        return _fallback_match_review(reference_path, candidate_paths)
+    return {
+        "verdict": "mismatch",
+        "confidence": 0.0,
+        "best_candidate": "",
+        "reason": reason,
+        "retry_guidance": (
+            "Fix Gemini match-review availability/configuration and rerun CUA. "
+            "Heuristic fallback matching is disabled."
+        ),
+    }
 
 
 def validate_data_with_cua(
@@ -1196,14 +1275,18 @@ def _collect_validation_questions(
     validator_flags: list[dict[str, str]],
     auditor_flags: list[dict[str, str]],
     coding_artifacts: dict[str, Any],
+    fabrication_artifacts: dict[str, Any] | None = None,
 ) -> list[str]:
     questions: list[str] = []
-    maybe_questions = coding_artifacts.get("questions", [])
-    if isinstance(maybe_questions, list):
-        for item in maybe_questions:
-            text = str(item).strip()
-            if text:
-                questions.append(text)
+    # Questions directly emitted by the LLM detectors take priority.
+    for artifacts in (fabrication_artifacts or {}, coding_artifacts):
+        maybe_questions = artifacts.get("questions", [])
+        if isinstance(maybe_questions, list):
+            for item in maybe_questions:
+                text = str(item).strip()
+                if text:
+                    questions.append(text)
+    # Fallback: derive questions from flag codes for any remaining uncovered flags.
     for flag in fetcher_flags + validator_flags + auditor_flags:
         generated = _question_from_flag(flag)
         if generated:
@@ -1229,80 +1312,111 @@ def _parse_validator_json(raw_text: str) -> dict[str, Any] | None:
         return None
 
 
+def _validator_retry_attempts() -> int:
+    raw = os.getenv("VALIDATOR_LLM_MAX_ATTEMPTS", "3")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 3
+    return max(1, min(6, value))
+
+
+def _validator_retry_delay_seconds() -> float:
+    raw = os.getenv("VALIDATOR_LLM_RETRY_DELAY_SECONDS", "1.5")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 1.5
+    return max(0.0, min(30.0, value))
+
+
+def _validator_temperature() -> float:
+    raw = os.getenv("VALIDATOR_LLM_TEMPERATURE", "0.2")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.2
+    return max(0.0, min(1.0, value))
+
+
 def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is required for validator agents.")
 
-    try:
-        model_name = _gemini_model()
-        _validator_log(agent_name, f"start model={model_name}")
-        _validator_log(agent_name, f"payload_bytes={len(json.dumps(payload, ensure_ascii=True))}")
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model_name,
-            contents=json.dumps(payload, ensure_ascii=True),
-            config=types.GenerateContentConfig(
-                temperature=1.0,
-                max_output_tokens=8192,
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-            ),
-        )
-        raw_text = (getattr(response, "text", "") or "").strip()
-        _validator_log(agent_name, "raw_response_begin")
-        print(raw_text)
-        _validator_log(agent_name, "raw_response_end")
+    model_name = _gemini_model()
+    _validator_log(agent_name, f"start model={model_name}")
+    _validator_log(agent_name, f"payload_bytes={len(json.dumps(payload, ensure_ascii=True))}")
+    client = genai.Client(api_key=api_key)
+    max_attempts = _validator_retry_attempts()
+    base_delay = _validator_retry_delay_seconds()
+    last_exc: Exception | None = None
 
-        parsed_any = getattr(response, "parsed", None)
-        if parsed_any is None:
-            parsed_dict = _parse_validator_json(raw_text)
-            if parsed_dict is None:
-                _validator_log(agent_name, "parse_failed: invalid JSON response")
-                raise ValueError("Invalid JSON response from validator model")
-            parsed_model = ValidatorResponseSchema.model_validate(parsed_dict)
-        elif isinstance(parsed_any, ValidatorResponseSchema):
-            parsed_model = parsed_any
-        elif isinstance(parsed_any, dict):
-            parsed_model = ValidatorResponseSchema.model_validate(parsed_any)
-        else:
-            parsed_model = ValidatorResponseSchema.model_validate(getattr(parsed_any, "model_dump", lambda: {})())
-        parsed = parsed_model.model_dump()
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            _validator_log(agent_name, f"retry attempt={attempt}/{max_attempts}")
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=json.dumps(payload, ensure_ascii=True),
+                config=types.GenerateContentConfig(
+                    temperature=_validator_temperature(),
+                    max_output_tokens=10000,
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                ),
+            )
+            raw_text = (getattr(response, "text", "") or "").strip()
+            _validator_log(agent_name, "raw_response_begin")
+            print(raw_text)
+            _validator_log(agent_name, "raw_response_end")
 
-        flags = _normalize_flags(parsed.get("flags"))
-        confidence = clamp(parsed.get("confidence", 0.5))
-        summary = str(parsed.get("summary", "")).strip() or f"{agent_name} completed."
-        artifacts = parsed.get("artifacts", {})
-        if not isinstance(artifacts, dict):
-            artifacts = {}
+            parsed_any = getattr(response, "parsed", None)
+            if parsed_any is None:
+                parsed_dict = _parse_validator_json(raw_text)
+                if parsed_dict is None:
+                    _validator_log(agent_name, "parse_failed: invalid JSON response")
+                    raise ValueError("Invalid JSON response from validator model")
+                parsed_model = ValidatorResponseSchema.model_validate(parsed_dict)
+            elif isinstance(parsed_any, ValidatorResponseSchema):
+                parsed_model = parsed_any
+            elif isinstance(parsed_any, dict):
+                parsed_model = ValidatorResponseSchema.model_validate(parsed_any)
+            else:
+                parsed_model = ValidatorResponseSchema.model_validate(
+                    getattr(parsed_any, "model_dump", lambda: {})()
+                )
+            parsed = parsed_model.model_dump()
 
-        return {
-            "status": _status_from_flags(flags),
-            "confidence": confidence,
-            "summary": summary,
-            "flags": flags,
-            "artifacts": artifacts,
-            "latency_ms": int((time.perf_counter() - started) * 1000),
-        }
-    except Exception as exc:
-        _validator_log(agent_name, f"exception={exc.__class__.__name__}: {exc}")
-        _validator_log(agent_name, "traceback_begin")
-        print(traceback.format_exc())
-        _validator_log(agent_name, "traceback_end")
-        return {
-            "status": "warn",
-            "confidence": 0.2,
-            "summary": f"{agent_name} failed during LLM validation.",
-            "flags": [
-                {
-                    "code": "LLM_VALIDATOR_ERROR",
-                    "message": f"{exc.__class__.__name__} while running LLM validator.",
-                }
-            ],
-            "artifacts": {"verdict": "unclear", "questions": []},
-            "latency_ms": int((time.perf_counter() - started) * 1000),
-        }
+            flags = _normalize_flags(parsed.get("flags"))
+            confidence = clamp(parsed.get("confidence", 0.5))
+            summary = str(parsed.get("summary", "")).strip() or f"{agent_name} completed."
+            artifacts = parsed.get("artifacts", {})
+            if not isinstance(artifacts, dict):
+                artifacts = {}
+
+            return {
+                "status": _status_from_flags(flags),
+                "confidence": confidence,
+                "summary": summary,
+                "flags": flags,
+                "artifacts": artifacts,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            }
+        except Exception as exc:  # pragma: no cover - runtime/network dependent
+            last_exc = exc
+            _validator_log(agent_name, f"attempt={attempt} failed error={exc.__class__.__name__}: {exc}")
+            if attempt >= max_attempts:
+                break
+            sleep_seconds = base_delay * (2 ** (attempt - 1))
+            time.sleep(sleep_seconds)
+
+    assert last_exc is not None
+    raise RuntimeError(
+        f"{agent_name} failed after {max_attempts} LLM attempt(s): "
+        f"{last_exc.__class__.__name__}: {last_exc}"
+    ) from last_exc
 
 
 def _run_llm_validators(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1320,9 +1434,19 @@ def _run_llm_validators(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
             CODING_ERRORS_VALIDATOR_PROMPT,
             payload,
         )
+        try:
+            fabrication_result = fabrication_future.result()
+        except Exception as exc:  # pragma: no cover - defensive
+            _validator_log("fabrication_detector", f"future_error={exc.__class__.__name__}: {exc}")
+            fabrication_result = _validator_error_result("fabrication_detector", time.perf_counter(), exc, 1)
+        try:
+            coding_result = coding_future.result()
+        except Exception as exc:  # pragma: no cover - defensive
+            _validator_log("coding_errors_detector", f"future_error={exc.__class__.__name__}: {exc}")
+            coding_result = _validator_error_result("coding_errors_detector", time.perf_counter(), exc, 1)
         return {
-            "fabrication_detector": fabrication_future.result(),
-            "coding_errors_detector": coding_future.result(),
+            "fabrication_detector": fabrication_result,
+            "coding_errors_detector": coding_result,
         }
 
 
@@ -1346,7 +1470,10 @@ class EvaluationResult:
 
 
 def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None = None) -> EvaluationResult:
-    frame, load_errors = _load_first_table(draft.uploaded_files)
+    # Classify uploaded files first so CSV scoring uses the right data file.
+    roles = _detect_file_roles(draft.uploaded_files, tickers=draft.tickers, thesis=draft.thesis)
+    scoring_files = roles["data_files"] if roles["data_files"] else draft.uploaded_files
+    frame, load_errors = _load_first_table(scoring_files)
     method_score, methodology_warnings = _methodology_score(draft.methodology_summary)
 
     hard_reject_reasons: list[str] = []
@@ -1358,10 +1485,8 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     # --- Backtest agent ---
     # When the user uploads a strategy .py/.ipynb, Claude generates and runs a standardised
     # backtest runner that computes all strategy_scorer.Strategy metrics.
-    # Falls back to CSV-based scoring when no strategy file is present or agent cannot complete.
     backtest_result: Any = None
     backtest_scored: Any = None
-    roles = _detect_file_roles(draft.uploaded_files)
     if roles["strategy_scripts"] and _BACKTEST_AGENT_AVAILABLE:
         _strat_files: list[tuple[str, str]] = []
         for _f in roles["strategy_scripts"]:
@@ -1395,12 +1520,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                     pitch_context={"name": draft.pitch_id, "ticker": _ticker},
                 )
             except ValueError as _cfg_err:
-                # Missing ANTHROPIC_API_KEY — infrastructure config problem, surface it clearly.
-                auditor_flags.append({
-                    "code": "BACKTEST_CONFIG_ERROR",
-                    "message": f"Backtest agent misconfigured: {_cfg_err}. Falling back to CSV-based scoring.",
-                })
-                backtest_result = None
+                raise RuntimeError(f"Backtest agent misconfigured: {_cfg_err}") from _cfg_err
 
             if backtest_result is not None:
                 if backtest_result.status == "success" and backtest_result.metrics:
@@ -1422,13 +1542,10 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                         "message": backtest_result.message,
                     })
                 elif backtest_result.status == "agent_fault":
-                    auditor_flags.append({
-                        "code": "BACKTEST_AGENT_FAULT",
-                        "message": (
-                            f"Backtest agent failed after {backtest_result.attempt_count} attempt(s). "
-                            "Falling back to CSV-based scoring."
-                        ),
-                    })
+                    raise RuntimeError(
+                        f"Backtest agent failed after {backtest_result.attempt_count} attempt(s). "
+                        f"Message: {backtest_result.message}"
+                    )
 
     if not draft.source_urls:
         hard_reject_reasons.append("No source URL was provided for submitted data.")
@@ -1571,9 +1688,18 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     validator_flags.extend(fabrication_result["flags"])
     auditor_flags.extend(coding_errors_result["flags"])
 
+    strategy_scorer_ready = backtest_scored is not None and not backtest_scored.disqualified
+    if not draft.one_shot_mode and not strategy_scorer_ready:
+        auditor_flags.append(
+            {
+                "code": "STRATEGY_SCORER_REQUIRED",
+                "message": "Backtest strategy scoring is required. CSV approximation scoring is disabled.",
+            }
+        )
+
     if draft.one_shot_mode:
         score = 100.0 if (one_shot_result and one_shot_result.recommendation == "VALID") else 0.0
-    elif backtest_scored is not None and not backtest_scored.disqualified:
+    elif strategy_scorer_ready:
         # Richer formula: 65% strategy-scorer composite + 35% data/methodology/provenance
         score = (
             0.65 * backtest_scored.composite_score
@@ -1582,14 +1708,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
             + 10.0 * match_rate
         )
     else:
-        score = 100.0 * (
-            (0.30 * sharpe_n)
-            + (0.20 * drawdown_n)
-            + (0.15 * risk_n)
-            + (0.15 * data_quality_score)
-            + (0.10 * method_score)
-            + (0.10 * match_rate)
-        )
+        score = 0.0
     overall_score = round(score, 1)
 
     if hard_reject_reasons:
@@ -1605,6 +1724,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         validator_flags=fabrication_result["flags"],
         auditor_flags=coding_errors_result["flags"],
         coding_artifacts=coding_errors_result.get("artifacts", {}),
+        fabrication_artifacts=fabrication_result.get("artifacts", {}),
     )
 
     coding_verdict = str(coding_errors_result.get("artifacts", {}).get("verdict", "clean")).strip().lower()
@@ -1700,15 +1820,15 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
             "confidence": (
                 float(one_shot_result.confidence)
                 if (draft.one_shot_mode and one_shot_result is not None)
-                else (0.9 if (backtest_scored and not backtest_scored.disqualified) else 0.8)
+                else (0.9 if strategy_scorer_ready else 0.3)
             ),
             "summary": (
                 "One-shot strategy binary recommendation."
                 if draft.one_shot_mode
                 else (
                     "Strategy-scorer composite from backtest agent."
-                    if (backtest_scored and not backtest_scored.disqualified)
-                    else "Deterministic v0 CSV-based scoring."
+                    if strategy_scorer_ready
+                    else "Strategy-scorer output unavailable."
                 )
             ),
             "flags": [] if not draft.one_shot_mode else (one_shot_result.flags if one_shot_result else []),
@@ -1716,7 +1836,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                 "source": (
                     "one_shot"
                     if draft.one_shot_mode
-                    else ("strategy_scorer" if (backtest_scored and not backtest_scored.disqualified) else "csv_approximation")
+                    else ("strategy_scorer" if strategy_scorer_ready else "strategy_scorer_unavailable")
                 ),
                 "sharpe": round(sharpe, 4),
                 "max_drawdown": round(max_drawdown, 4),
@@ -1729,6 +1849,8 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                 "one_shot_artifacts": (
                     one_shot_result.artifacts if (draft.one_shot_mode and one_shot_result is not None) else None
                 ),
+                "backtest_attempt_count": backtest_result.attempt_count if backtest_result else 0,
+                "backtest_metrics": backtest_result.metrics if backtest_result else None,
                 **(
                     {
                         "composite_score": backtest_scored.composite_score,
@@ -1743,8 +1865,6 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                             }
                             for c in backtest_scored.component_scores
                         },
-                        "backtest_attempt_count": backtest_result.attempt_count if backtest_result else 0,
-                        "backtest_metrics": backtest_result.metrics if backtest_result else None,
                     }
                     if backtest_scored is not None
                     else {}
@@ -1780,7 +1900,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         f"- Data quality score: `{round(data_quality_score, 4)}`",
         f"- Methodology score: `{round(method_score, 4)}`",
         f"- Match rate: `{round(match_rate, 4)}`",
-        f"- Scoring source: `{'one_shot' if draft.one_shot_mode else ('strategy_scorer' if (backtest_scored and not backtest_scored.disqualified) else 'csv_approximation')}`",
+        f"- Scoring source: `{'one_shot' if draft.one_shot_mode else ('strategy_scorer' if strategy_scorer_ready else 'strategy_scorer_unavailable')}`",
     ]
 
     if draft.one_shot_mode and one_shot_result is not None:

@@ -12,7 +12,7 @@ REPO_ROOT = ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from pitch_engine import PitchDraft, UploadedFile, evaluate_pitch, file_sha256
+from pitch_engine import PitchDraft, UploadedFile, evaluate_pitch, file_sha256, validate_data_with_cua
 
 DATA_DIR = ROOT / "data"
 
@@ -96,10 +96,63 @@ def summarize(result: dict) -> dict:
         "pitch_id": result["pitch_id"],
         "validation_outcome": result["validation_outcome"],
         "decision": result["decision"],
+        "data_fetcher_status": agent_outputs["data_fetcher"]["status"],
+        "data_fetcher_flags": agent_outputs["data_fetcher"]["flags"],
         "data_validator_flags": agent_outputs["data_validator"]["flags"],
         "pipeline_auditor_flags": agent_outputs["pipeline_auditor"]["flags"],
         "validation_questions": result["validation_questions"],
     }
+
+
+def _stub_cua_output(case: PitchDraft) -> dict:
+    match_rate_raw = os.getenv("VALIDATOR_CASES_STUB_MATCH_RATE", "0.9")
+    try:
+        match_rate = float(match_rate_raw)
+    except ValueError:
+        match_rate = 0.9
+    match_rate = max(0.0, min(1.0, match_rate))
+
+    return {
+        "agent": "data_fetcher",
+        "status": "ok",
+        "confidence": 0.9,
+        "summary": "Stubbed CUA output for validator-case pipeline tests.",
+        "flags": [],
+        "artifacts": {
+            "match_rate": match_rate,
+            "source": "validator_cases_stub",
+            "validated_file_names": [entry.name for entry in case.uploaded_files],
+        },
+        "latency_ms": 1,
+    }
+
+
+def evaluate_case(case: PitchDraft):
+    mode = os.getenv("VALIDATOR_CASES_CUA_MODE", "stub").strip().lower()
+    if mode == "none":
+        return evaluate_pitch(case)
+
+    if mode == "real":
+        csv_like = [f for f in case.uploaded_files if Path(f.path).suffix.lower() in {".csv", ".tsv"}]
+        if not csv_like:
+            fetcher_output = {
+                "agent": "data_fetcher",
+                "status": "fail",
+                "confidence": 0.0,
+                "summary": "No CSV/TSV uploaded for CUA validation.",
+                "flags": [{"code": "CUA_DATA_FILES_MISSING", "message": "No CSV/TSV files to validate."}],
+                "artifacts": {"match_rate": 0.0},
+                "latency_ms": 0,
+            }
+        else:
+            fetcher_output = validate_data_with_cua(
+                draft=case,
+                file_to_validate=csv_like[0].name,
+                notes="validator_cases real CUA run",
+            )
+        return evaluate_pitch(case, data_fetcher_output=fetcher_output)
+
+    return evaluate_pitch(case, data_fetcher_output=_stub_cua_output(case))
 
 
 def main() -> int:
@@ -110,11 +163,10 @@ def main() -> int:
 
     for case in build_cases():
         print(f"\n=== Running {case.pitch_id} ===")
-        result = evaluate_pitch(case)
+        result = evaluate_case(case)
         print(json.dumps(summarize(result.to_dict()), indent=2))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

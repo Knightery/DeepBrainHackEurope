@@ -72,6 +72,34 @@ OPTIONAL_FIELDS = {
     "exposure_time": None,
 }
 
+FLOAT_FIELDS = {
+    "benchmark_cagr",
+    "benchmark_max_drawdown",
+    "benchmark_total_return",
+    "cagr",
+    "total_return",
+    "volatility",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "max_drawdown",
+    "win_rate",
+    "avg_win",
+    "avg_loss",
+    "profit_factor",
+    "expectancy",
+    "alpha",
+    "information_ratio",
+    "excess_return",
+    "up_capture",
+    "down_capture",
+}
+
+INT_FIELDS = {
+    "max_drawdown_duration",
+    "total_trades",
+}
+
 
 @dataclass
 class Strategy:
@@ -148,32 +176,58 @@ def validate_and_load(raw: dict) -> tuple[Optional[Strategy], list[str]]:
         errors.append(f"Missing required fields: {sorted(missing)}")
         return None, errors
 
+    normalized = dict(raw)
+
+    # Coerce numeric-looking strings before sanity checks.
+    for field in FLOAT_FIELDS:
+        value = normalized.get(field)
+        try:
+            normalized[field] = float(value)
+        except (TypeError, ValueError):
+            errors.append(f"{field} must be a float, got {value!r}")
+
+    for field in INT_FIELDS:
+        value = normalized.get(field)
+        try:
+            if isinstance(value, str):
+                parsed = float(value)
+            else:
+                parsed = value
+            normalized[field] = int(parsed)
+            if float(parsed) != float(normalized[field]):
+                errors.append(f"{field} must be an integer, got {value!r}")
+        except (TypeError, ValueError):
+            errors.append(f"{field} must be an integer, got {value!r}")
+
+    if errors:
+        return None, errors
+
     # Sanity checks
-    if raw["win_rate"] < 0 or raw["win_rate"] > 1:
-        errors.append(f"win_rate must be in [0, 1], got {raw['win_rate']}")
-    if raw["max_drawdown"] > 0:
-        errors.append(f"max_drawdown should be negative, got {raw['max_drawdown']}")
-    if raw["benchmark_max_drawdown"] > 0:
-        errors.append(f"benchmark_max_drawdown should be negative, got {raw['benchmark_max_drawdown']}")
-    if raw["avg_loss"] > 0:
-        errors.append(f"avg_loss should be negative, got {raw['avg_loss']}")
-    if raw["total_trades"] < 1:
-        errors.append(f"total_trades must be >= 1, got {raw['total_trades']}")
+    if normalized["win_rate"] < 0 or normalized["win_rate"] > 1:
+        errors.append(f"win_rate must be in [0, 1], got {normalized['win_rate']}")
+    if normalized["max_drawdown"] > 0:
+        errors.append(f"max_drawdown should be negative, got {normalized['max_drawdown']}")
+    if normalized["benchmark_max_drawdown"] > 0:
+        errors.append(f"benchmark_max_drawdown should be negative, got {normalized['benchmark_max_drawdown']}")
+    if normalized["avg_loss"] > 0:
+        errors.append(f"avg_loss should be negative, got {normalized['avg_loss']}")
+    if normalized["total_trades"] < 1:
+        errors.append(f"total_trades must be >= 1, got {normalized['total_trades']}")
 
     # Cross-validate excess_return
-    computed_excess = raw["cagr"] - raw["benchmark_cagr"]
-    if abs(computed_excess - raw["excess_return"]) > 0.005:
+    computed_excess = normalized["cagr"] - normalized["benchmark_cagr"]
+    if abs(computed_excess - normalized["excess_return"]) > 0.005:
         errors.append(
-            f"excess_return {raw['excess_return']:.4f} doesn't match "
+            f"excess_return {normalized['excess_return']:.4f} doesn't match "
             f"cagr - benchmark_cagr = {computed_excess:.4f} (tolerance 0.5%)"
         )
 
     if errors:
         return None, errors
 
-    kwargs = {k: raw[k] for k in REQUIRED_FIELDS}
+    kwargs = {k: normalized[k] for k in REQUIRED_FIELDS}
     for k, default in OPTIONAL_FIELDS.items():
-        kwargs[k] = raw.get(k, default)
+        kwargs[k] = normalized.get(k, default)
 
     return Strategy(**kwargs), []
 

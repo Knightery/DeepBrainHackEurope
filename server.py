@@ -32,8 +32,8 @@ def _load_theme() -> dict[str, Any]:
         return {}
     try:
         return json.loads(THEME_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Theme JSON is invalid at {THEME_PATH}: {exc}") from exc
 
 
 def _dashboard_html(theme: dict[str, Any]) -> str:
@@ -246,5 +246,7 @@ try:
     from chainlit.utils import mount_chainlit
 
     mount_chainlit(app=app, target="app.py", path="/app")
-except Exception:
-    pass
+except Exception as exc:
+    raise RuntimeError(
+        f"Failed to mount Chainlit app at /app: {exc.__class__.__name__}: {exc}"
+    ) from exc

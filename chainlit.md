@@ -14,8 +14,7 @@ Submit a quantitative trading strategy for structured, multi-agent evaluation.
 
 - `/status` -- show pitch completeness
 - `/checklist` -- show onboarding checklist
-- `/evaluate` -- run full validation and scoring pipeline
-- `/validate` -- re-run validation after clarifications
+- `/evaluate` -- run full validation and scoring pipeline (also used to re-run after clarifications)
 - `/backtest` -- run Claude backtest agent on uploaded `.py` or `.ipynb` strategy
 - `/validate_data "file" "notes"` -- run CUA browser validation against source URLs
 - `/reset` -- start a new pitch

@@ -22,7 +22,7 @@ BACKTEST_TIMEOUT_SECONDS=120
 BACKTEST_MAX_ATTEMPTS=3
 ```
 
-> `ANTHROPIC_API_KEY` is required for both the backtest agent (in-process) and the CUA data fetcher (Docker). If absent, `/backtest` will be unavailable and evaluation falls back to CSV-based scoring.
+> `ANTHROPIC_API_KEY` is required for both the backtest agent (in-process) and the CUA data fetcher (Docker). If absent, `/backtest` will be unavailable and strategy scoring cannot complete.
 
 ## 3) Run the app
 
