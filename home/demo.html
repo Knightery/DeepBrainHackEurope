@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anyquant | API Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html { overscroll-behavior: none; }
+        body {
+            font-family: 'Space Grotesk', -apple-system, sans-serif;
+            background: #000; color: #fff;
+            overflow-x: hidden; overscroll-behavior: none; -webkit-font-smoothing: antialiased;
+        }
+
+        .topbar {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 14px 32px; background: rgba(0,0,0,0.92);
+            backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .topbar .left { display: flex; align-items: center; gap: 20px; }
+        .topbar .logo img { height: 34px; display: block; filter: brightness(1.1); }
+        .topbar .env-badge {
+            padding: 3px 10px; border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.68rem;
+            background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.4);
+            letter-spacing: 0.05em; text-transform: uppercase;
+        }
+        .topbar .right { display: flex; align-items: center; gap: 20px; }
+        .topbar .right a {
+            color: rgba(255,255,255,0.5); text-decoration: none;
+            font-size: 0.85rem; transition: color 0.2s;
+        }
+        .topbar .right a:hover { color: #fff; }
+        .avatar {
+            width: 32px; height: 32px; border-radius: 50%;
+            background: rgba(255,255,255,0.1); display: flex;
+            align-items: center; justify-content: center;
+            font-size: 0.78rem; font-weight: 600; color: rgba(255,255,255,0.5);
+        }
+
+        .layout {
+            display: flex; min-height: 100vh; padding-top: 56px;
+        }
+
+        .sidebar {
+            width: 220px; flex-shrink: 0; padding: 28px 0;
+            border-right: 1px solid rgba(255,255,255,0.06);
+            position: sticky; top: 56px; height: calc(100vh - 56px);
+        }
+        .sidebar a {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 24px; color: rgba(255,255,255,0.4);
+            text-decoration: none; font-size: 0.88rem; font-weight: 500;
+            transition: all 0.15s; border-left: 2px solid transparent;
+        }
+        .sidebar a:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.02); }
+        .sidebar a.active {
+            color: #fff; background: rgba(255,255,255,0.04);
+            border-left-color: #fff;
+        }
+        .sidebar .section-label {
+            padding: 18px 24px 6px; font-size: 0.65rem;
+            text-transform: uppercase; letter-spacing: 0.15em;
+            color: rgba(255,255,255,0.2); font-family: 'JetBrains Mono', monospace;
+        }
+
+        .main {
+            flex: 1; padding: 36px 44px; max-width: 1040px;
+        }
+        .page-title {
+            font-size: 1.8rem; font-weight: 700; letter-spacing: -0.02em;
+            margin-bottom: 6px;
+        }
+        .page-desc {
+            font-size: 0.92rem; color: rgba(255,255,255,0.4); margin-bottom: 32px;
+        }
+
+        .stats-row {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 18px; margin-bottom: 36px;
+        }
+        .stat-card {
+            border: 1px solid rgba(255,255,255,0.08); border-radius: 12px;
+            padding: 22px 24px; background: rgba(255,255,255,0.02);
+        }
+        .stat-card .label {
+            font-size: 0.72rem; color: rgba(255,255,255,0.35);
+            text-transform: uppercase; letter-spacing: 0.1em;
+            font-family: 'JetBrains Mono', monospace; margin-bottom: 8px;
+        }
+        .stat-card .value {
+            font-size: 1.8rem; font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .stat-card .sub {
+            font-size: 0.78rem; color: rgba(255,255,255,0.3); margin-top: 4px;
+        }
+
+        .card {
+            border: 1px solid rgba(255,255,255,0.08); border-radius: 14px;
+            padding: 28px; background: rgba(255,255,255,0.02); margin-bottom: 24px;
+        }
+        .card-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 20px;
+        }
+        .card-header h2 { font-size: 1.15rem; font-weight: 600; }
+        .card-header .badge-count {
+            padding: 3px 10px; border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
+            background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.4);
+        }
+
+        .btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 10px 20px; border-radius: 8px;
+            font-weight: 600; font-size: 0.85rem; font-family: inherit;
+            text-decoration: none; transition: all 0.2s; cursor: pointer; border: none;
+        }
+        .btn-white { background: #fff; color: #000; }
+        .btn-white:hover { background: #e0e0e0; transform: translateY(-1px); }
+        .btn-outline {
+            background: transparent; color: #fff;
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        .btn-outline:hover { border-color: rgba(255,255,255,0.35); background: rgba(255,255,255,0.04); }
+        .btn-sm { padding: 7px 14px; font-size: 0.78rem; }
+        .btn-danger { background: transparent; color: #ff4444; border: 1px solid rgba(255,68,68,0.2); }
+        .btn-danger:hover { background: rgba(255,68,68,0.08); border-color: rgba(255,68,68,0.4); }
+
+        .api-key-row {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 14px 0; border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .api-key-row:last-child { border-bottom: none; }
+        .api-key-info { display: flex; flex-direction: column; gap: 4px; }
+        .api-key-name { font-weight: 600; font-size: 0.92rem; }
+        .api-key-value {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+            color: rgba(255,255,255,0.3); letter-spacing: 0.03em;
+        }
+        .api-key-meta {
+            font-size: 0.72rem; color: rgba(255,255,255,0.2);
+        }
+        .api-key-actions { display: flex; gap: 8px; }
+
+        .usage-bar-container { margin-top: 16px; }
+        .usage-bar-label {
+            display: flex; justify-content: space-between; margin-bottom: 8px;
+            font-size: 0.82rem;
+        }
+        .usage-bar-label span:last-child { color: rgba(255,255,255,0.3); }
+        .usage-bar {
+            height: 8px; background: rgba(255,255,255,0.06);
+            border-radius: 4px; overflow: hidden;
+        }
+        .usage-bar-fill {
+            height: 100%; background: #fff; border-radius: 4px;
+            transition: width 1s ease;
+        }
+
+        .plan-cards {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 18px;
+        }
+        .plan-card {
+            border: 1px solid rgba(255,255,255,0.08); border-radius: 12px;
+            padding: 28px 24px; background: rgba(255,255,255,0.02);
+            transition: all 0.3s; position: relative;
+        }
+        .plan-card:hover { border-color: rgba(255,255,255,0.18); }
+        .plan-card.current { border-color: rgba(255,255,255,0.25); }
+        .plan-card.current::after {
+            content: 'CURRENT'; position: absolute; top: 14px; right: 14px;
+            font-size: 0.6rem; font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 0.1em; color: rgba(255,255,255,0.4);
+            padding: 2px 8px; border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 4px;
+        }
+        .plan-name { font-size: 1.1rem; font-weight: 600; margin-bottom: 6px; }
+        .plan-price {
+            font-size: 2rem; font-weight: 700; font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 4px;
+        }
+        .plan-price span { font-size: 0.85rem; font-weight: 400; color: rgba(255,255,255,0.35); }
+        .plan-features {
+            list-style: none; margin: 18px 0 22px; display: flex;
+            flex-direction: column; gap: 8px;
+        }
+        .plan-features li {
+            font-size: 0.85rem; color: rgba(255,255,255,0.5);
+            padding-left: 18px; position: relative;
+        }
+        .plan-features li::before {
+            content: '■'; position: absolute; left: 0;
+            color: rgba(255,255,255,0.2); font-size: 0.6rem; top: 2px;
+        }
+
+        .log-table { width: 100%; border-collapse: collapse; }
+        .log-table th {
+            text-align: left; padding: 10px 12px;
+            font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em;
+            color: rgba(255,255,255,0.25); font-family: 'JetBrains Mono', monospace;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .log-table td {
+            padding: 12px 12px; font-size: 0.85rem;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+            color: rgba(255,255,255,0.6);
+        }
+        .log-table .mono {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+        }
+        .status-dot {
+            display: inline-block; width: 7px; height: 7px;
+            border-radius: 50%; margin-right: 6px;
+        }
+        .status-dot.ok { background: #4ade80; }
+        .status-dot.err { background: #ff4444; }
+
+        .modal-overlay {
+            display: none; position: fixed; inset: 0; z-index: 200;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(6px);
+            align-items: center; justify-content: center;
+        }
+        .modal-overlay.visible { display: flex; }
+        .modal {
+            background: #0a0a0a; border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 16px; padding: 36px; width: 100%; max-width: 440px;
+        }
+        .modal h3 { font-size: 1.2rem; font-weight: 600; margin-bottom: 8px; }
+        .modal p { font-size: 0.88rem; color: rgba(255,255,255,0.4); margin-bottom: 22px; line-height: 1.5; }
+        .modal input {
+            width: 100%; padding: 12px 14px; background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;
+            color: #fff; font-family: inherit; font-size: 0.92rem;
+            outline: none; margin-bottom: 16px;
+        }
+        .modal input:focus { border-color: rgba(255,255,255,0.3); }
+        .modal input::placeholder { color: rgba(255,255,255,0.2); }
+        .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+        .grid-bg { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+
+        .hidden-section { display: none; }
+        .hidden-section.active { display: block; }
+
+        @media (max-width: 768px) {
+            .topbar { padding: 12px 16px; }
+            .sidebar { display: none; }
+            .main { padding: 24px 16px; }
+            .stats-row { grid-template-columns: 1fr 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="bgCanvas" class="grid-bg"></canvas>
+
+<div class="topbar">
+    <div class="left">
+        <a class="logo" href="/home"><img src="/home/static/Anyquant_banner.png" alt="Anyquant"></a>
+        <span class="env-badge">demo</span>
+    </div>
+    <div class="right">
+        <a href="/eva-api">← Back to Eva API</a>
+        <div class="avatar">JS</div>
+    </div>
+</div>
+
+<div class="layout">
+    <div class="sidebar">
+        <div class="section-label">Dashboard</div>
+        <a href="#" class="active" data-page="overview">Overview</a>
+        <a href="#" data-page="keys">API Keys</a>
+        <a href="#" data-page="usage">Usage</a>
+        <div class="section-label">Billing</div>
+        <a href="#" data-page="credits">Credits</a>
+        <a href="#" data-page="plans">Plans</a>
+        <div class="section-label">Developer</div>
+        <a href="#" data-page="logs">Request Logs</a>
+    </div>
+
+    <div class="main">
+        <!-- OVERVIEW -->
+        <div class="hidden-section active" id="page-overview">
+            <div class="page-title">Dashboard</div>
+            <div class="page-desc">Welcome back, Jane. Here's your API overview.</div>
+            <div class="stats-row">
+                <div class="stat-card">
+                    <div class="label">Credits Remaining</div>
+                    <div class="value">8,421</div>
+                    <div class="sub">of 10,000 this month</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Requests Today</div>
+                    <div class="value">1,247</div>
+                    <div class="sub">↑ 12% vs yesterday</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Avg Latency</div>
+                    <div class="value">62ms</div>
+                    <div class="sub">p99: 148ms</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Success Rate</div>
+                    <div class="value">99.8%</div>
+                    <div class="sub">3 errors today</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>Credit Usage — Last 7 Days</h2></div>
+                <canvas id="usageChart" style="width:100%;height:180px;"></canvas>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2>Recent Requests</h2>
+                    <span class="badge-count">Last 5</span>
+                </div>
+                <table class="log-table">
+                    <thead><tr><th>Status</th><th>Endpoint</th><th>Latency</th><th>Time</th></tr></thead>
+                    <tbody>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">/v1/evaluate</td><td class="mono">54ms</td><td>2 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">/v1/evaluate</td><td class="mono">71ms</td><td>4 min ago</td></tr>
+                        <tr><td><span class="status-dot err"></span>429</td><td class="mono">/v1/evaluate</td><td class="mono">12ms</td><td>8 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">/v1/backtest</td><td class="mono">142ms</td><td>15 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">/v1/evaluate</td><td class="mono">48ms</td><td>22 min ago</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- API KEYS -->
+        <div class="hidden-section" id="page-keys">
+            <div class="page-title">API Keys</div>
+            <div class="page-desc">Manage your API keys. Keep them secret.</div>
+            <div class="card">
+                <div class="card-header">
+                    <h2>Active Keys</h2>
+                    <button class="btn btn-white btn-sm" id="createKeyBtn">+ Create Key</button>
+                </div>
+                <div class="api-key-row">
+                    <div class="api-key-info">
+                        <div class="api-key-name">Production</div>
+                        <div class="api-key-value">aq_live_••••••••••••7f3a</div>
+                        <div class="api-key-meta">Created Jan 15, 2026 · Last used 2 min ago</div>
+                    </div>
+                    <div class="api-key-actions">
+                        <button class="btn btn-outline btn-sm" onclick="copyKey(this)">Copy</button>
+                        <button class="btn btn-outline btn-sm" onclick="rollKey(this)">Roll</button>
+                        <button class="btn btn-danger btn-sm">Revoke</button>
+                    </div>
+                </div>
+                <div class="api-key-row">
+                    <div class="api-key-info">
+                        <div class="api-key-name">Development</div>
+                        <div class="api-key-value">aq_test_••••••••••••b2c1</div>
+                        <div class="api-key-meta">Created Feb 3, 2026 · Last used 1 hour ago</div>
+                    </div>
+                    <div class="api-key-actions">
+                        <button class="btn btn-outline btn-sm" onclick="copyKey(this)">Copy</button>
+                        <button class="btn btn-outline btn-sm" onclick="rollKey(this)">Roll</button>
+                        <button class="btn btn-danger btn-sm">Revoke</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- USAGE -->
+        <div class="hidden-section" id="page-usage">
+            <div class="page-title">Usage</div>
+            <div class="page-desc">Track your API consumption and rate limits.</div>
+            <div class="stats-row">
+                <div class="stat-card">
+                    <div class="label">This Month</div>
+                    <div class="value">1,579</div>
+                    <div class="sub">credits consumed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Rate Limit</div>
+                    <div class="value">100</div>
+                    <div class="sub">requests / minute</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Avg Cost</div>
+                    <div class="value">1.2</div>
+                    <div class="sub">credits / request</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>Monthly Usage</h2></div>
+                <div class="usage-bar-container">
+                    <div class="usage-bar-label"><span>1,579 / 10,000 credits</span><span>15.8%</span></div>
+                    <div class="usage-bar"><div class="usage-bar-fill" style="width:15.8%"></div></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>By Endpoint</h2></div>
+                <table class="log-table">
+                    <thead><tr><th>Endpoint</th><th>Requests</th><th>Credits</th><th>Avg Latency</th></tr></thead>
+                    <tbody>
+                        <tr><td class="mono">/v1/evaluate</td><td>1,104</td><td>1,104</td><td class="mono">62ms</td></tr>
+                        <tr><td class="mono">/v1/backtest</td><td>187</td><td>374</td><td class="mono">148ms</td></tr>
+                        <tr><td class="mono">/v1/risk</td><td>101</td><td>101</td><td class="mono">44ms</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- CREDITS -->
+        <div class="hidden-section" id="page-credits">
+            <div class="page-title">Credits</div>
+            <div class="page-desc">Purchase additional API credits for your account.</div>
+            <div class="card">
+                <div class="card-header"><h2>Current Balance</h2></div>
+                <div style="display:flex;align-items:baseline;gap:12px;">
+                    <span style="font-size:2.8rem;font-weight:700;font-family:'JetBrains Mono',monospace;">8,421</span>
+                    <span style="color:rgba(255,255,255,0.35);font-size:0.92rem;">credits remaining</span>
+                </div>
+                <div class="usage-bar-container" style="margin-top:20px;">
+                    <div class="usage-bar-label"><span>8,421 / 10,000</span><span>84.2%</span></div>
+                    <div class="usage-bar"><div class="usage-bar-fill" style="width:84.2%"></div></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>Purchase Credits</h2></div>
+                <div class="plan-cards">
+                    <div class="plan-card" onclick="selectCredit(this)">
+                        <div class="plan-name">Starter Pack</div>
+                        <div class="plan-price">$49 <span>/ 5,000 credits</span></div>
+                        <div style="font-size:0.78rem;color:rgba(255,255,255,0.3);margin-top:4px;">$0.0098 per credit</div>
+                        <button class="btn btn-outline btn-sm" style="margin-top:16px;" onclick="purchaseCredits(event)">Purchase</button>
+                    </div>
+                    <div class="plan-card" onclick="selectCredit(this)">
+                        <div class="plan-name">Growth Pack</div>
+                        <div class="plan-price">$179 <span>/ 25,000 credits</span></div>
+                        <div style="font-size:0.78rem;color:rgba(255,255,255,0.3);margin-top:4px;">$0.0072 per credit</div>
+                        <button class="btn btn-white btn-sm" style="margin-top:16px;" onclick="purchaseCredits(event)">Purchase</button>
+                    </div>
+                    <div class="plan-card" onclick="selectCredit(this)">
+                        <div class="plan-name">Enterprise</div>
+                        <div class="plan-price">$499 <span>/ 100,000 credits</span></div>
+                        <div style="font-size:0.78rem;color:rgba(255,255,255,0.3);margin-top:4px;">$0.0050 per credit</div>
+                        <button class="btn btn-outline btn-sm" style="margin-top:16px;" onclick="purchaseCredits(event)">Purchase</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PLANS -->
+        <div class="hidden-section" id="page-plans">
+            <div class="page-title">Plans</div>
+            <div class="page-desc">Choose the right plan for your team.</div>
+            <div class="plan-cards">
+                <div class="plan-card">
+                    <div class="plan-name">Free</div>
+                    <div class="plan-price">$0 <span>/ month</span></div>
+                    <ul class="plan-features">
+                        <li>1,000 credits / month</li>
+                        <li>10 req/min rate limit</li>
+                        <li>Community support</li>
+                        <li>1 API key</li>
+                    </ul>
+                    <button class="btn btn-outline btn-sm">Downgrade</button>
+                </div>
+                <div class="plan-card current">
+                    <div class="plan-name">Pro</div>
+                    <div class="plan-price">$99 <span>/ month</span></div>
+                    <ul class="plan-features">
+                        <li>10,000 credits / month</li>
+                        <li>100 req/min rate limit</li>
+                        <li>Priority support</li>
+                        <li>5 API keys</li>
+                        <li>Webhook integrations</li>
+                    </ul>
+                    <button class="btn btn-white btn-sm" disabled>Current Plan</button>
+                </div>
+                <div class="plan-card">
+                    <div class="plan-name">Enterprise</div>
+                    <div class="plan-price">Custom</div>
+                    <ul class="plan-features">
+                        <li>Unlimited credits</li>
+                        <li>Custom rate limits</li>
+                        <li>Dedicated support</li>
+                        <li>Unlimited API keys</li>
+                        <li>SSO & SAML</li>
+                        <li>Custom SLA</li>
+                    </ul>
+                    <button class="btn btn-outline btn-sm" onclick="alert('Demo only — contact sales')">Contact Sales</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- LOGS -->
+        <div class="hidden-section" id="page-logs">
+            <div class="page-title">Request Logs</div>
+            <div class="page-desc">Full audit trail of API requests.</div>
+            <div class="card">
+                <div class="card-header">
+                    <h2>Last 24 Hours</h2>
+                    <span class="badge-count">247 requests</span>
+                </div>
+                <table class="log-table">
+                    <thead><tr><th>Status</th><th>Method</th><th>Endpoint</th><th>Latency</th><th>Credits</th><th>Time</th></tr></thead>
+                    <tbody>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">POST</td><td class="mono">/v1/evaluate</td><td class="mono">54ms</td><td>1</td><td>2 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">POST</td><td class="mono">/v1/evaluate</td><td class="mono">71ms</td><td>1</td><td>4 min ago</td></tr>
+                        <tr><td><span class="status-dot err"></span>429</td><td class="mono">POST</td><td class="mono">/v1/evaluate</td><td class="mono">12ms</td><td>0</td><td>8 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">POST</td><td class="mono">/v1/backtest</td><td class="mono">142ms</td><td>2</td><td>15 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">POST</td><td class="mono">/v1/evaluate</td><td class="mono">48ms</td><td>1</td><td>22 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">GET</td><td class="mono">/v1/risk</td><td class="mono">38ms</td><td>1</td><td>31 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">POST</td><td class="mono">/v1/evaluate</td><td class="mono">59ms</td><td>1</td><td>45 min ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">POST</td><td class="mono">/v1/backtest</td><td class="mono">167ms</td><td>2</td><td>1 hour ago</td></tr>
+                        <tr><td><span class="status-dot err"></span>400</td><td class="mono">POST</td><td class="mono">/v1/evaluate</td><td class="mono">8ms</td><td>0</td><td>1 hour ago</td></tr>
+                        <tr><td><span class="status-dot ok"></span>200</td><td class="mono">POST</td><td class="mono">/v1/evaluate</td><td class="mono">52ms</td><td>1</td><td>2 hours ago</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Key Modal -->
+<div class="modal-overlay" id="keyModal">
+    <div class="modal">
+        <h3>Create API Key</h3>
+        <p>Give your new key a name so you can identify it later.</p>
+        <input type="text" id="keyNameInput" placeholder="e.g. Staging, CI/CD, Research...">
+        <div class="modal-actions">
+            <button class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-white btn-sm" onclick="createKey()">Create Key</button>
+        </div>
+    </div>
+</div>
+
+<!-- Purchase Confirmation Modal -->
+<div class="modal-overlay" id="purchaseModal">
+    <div class="modal">
+        <h3>Purchase Confirmed</h3>
+        <p>Your credits have been added to your account. They're available immediately.</p>
+        <div class="modal-actions">
+            <button class="btn btn-white btn-sm" onclick="closePurchaseModal()">Done</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function(){
+    const c=document.getElementById('bgCanvas');
+    if(!c)return;
+    const CELL=10,SQ=8,GAP=1,BASE='#0c0c0c';
+    function draw(){
+        const dpr=devicePixelRatio||1;
+        c.width=innerWidth*dpr;c.height=innerHeight*dpr;
+        c.style.width=innerWidth+'px';c.style.height=innerHeight+'px';
+        const ctx=c.getContext('2d');ctx.scale(dpr,dpr);
+        ctx.fillStyle='#000';ctx.fillRect(0,0,innerWidth,innerHeight);
+        ctx.fillStyle=BASE;
+        for(let y=0;y<innerHeight;y+=CELL)for(let x=0;x<innerWidth;x+=CELL)
+            ctx.fillRect(x+GAP,y+GAP,SQ,SQ);
+    }
+    draw();
+    let t;addEventListener('resize',()=>{clearTimeout(t);t=setTimeout(draw,100)});
+})();
+
+// Sidebar navigation
+document.querySelectorAll('.sidebar a[data-page]').forEach(a=>{
+    a.addEventListener('click',e=>{
+        e.preventDefault();
+        document.querySelectorAll('.sidebar a').forEach(l=>l.classList.remove('active'));
+        a.classList.add('active');
+        document.querySelectorAll('.hidden-section').forEach(s=>s.classList.remove('active'));
+        const pg=document.getElementById('page-'+a.dataset.page);
+        if(pg) pg.classList.add('active');
+    });
+});
+
+// Create key modal
+document.getElementById('createKeyBtn').addEventListener('click',()=>{
+    document.getElementById('keyModal').classList.add('visible');
+});
+function closeModal(){document.getElementById('keyModal').classList.remove('visible')}
+function createKey(){
+    const name=document.getElementById('keyNameInput').value||'Untitled';
+    const container=document.querySelector('#page-keys .card');
+    const row=document.createElement('div');
+    row.className='api-key-row';
+    row.innerHTML=`
+        <div class="api-key-info">
+            <div class="api-key-name">${name}</div>
+            <div class="api-key-value">aq_live_••••••••••••${Math.random().toString(36).slice(2,6)}</div>
+            <div class="api-key-meta">Created just now</div>
+        </div>
+        <div class="api-key-actions">
+            <button class="btn btn-outline btn-sm" onclick="copyKey(this)">Copy</button>
+            <button class="btn btn-outline btn-sm" onclick="rollKey(this)">Roll</button>
+            <button class="btn btn-danger btn-sm">Revoke</button>
+        </div>`;
+    container.appendChild(row);
+    closeModal();
+    document.getElementById('keyNameInput').value='';
+}
+
+function copyKey(btn){const t=btn.textContent;btn.textContent='Copied!';setTimeout(()=>btn.textContent=t,1500)}
+function rollKey(btn){const t=btn.textContent;btn.textContent='Rolled!';setTimeout(()=>btn.textContent=t,1500)}
+
+function purchaseCredits(e){
+    e.stopPropagation();
+    document.getElementById('purchaseModal').classList.add('visible');
+}
+function closePurchaseModal(){document.getElementById('purchaseModal').classList.remove('visible')}
+function selectCredit(el){
+    document.querySelectorAll('.plan-card').forEach(c=>c.style.borderColor='');
+    el.style.borderColor='rgba(255,255,255,0.35)';
+}
+
+// Usage chart (simple canvas bars)
+const uc=document.getElementById('usageChart');
+if(uc){
+    const dpr=devicePixelRatio||1;
+    const W=uc.clientWidth,H=uc.clientHeight;
+    uc.width=W*dpr;uc.height=H*dpr;
+    const ctx=uc.getContext('2d');ctx.scale(dpr,dpr);
+    const data=[820,1340,960,1100,1580,1240,1420];
+    const labels=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    const mx=Math.max(...data),bw=W/data.length*0.5,gap=W/data.length;
+    ctx.textAlign='center';
+    ctx.font='11px "JetBrains Mono",monospace';
+    for(let i=0;i<data.length;i++){
+        const bh=(data[i]/mx)*(H-36);
+        const x=gap*i+gap/2-bw/2;
+        const y=H-28-bh;
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(x,y,bw,bh);
+        ctx.fillStyle='rgba(255,255,255,0.25)';
+        ctx.fillText(labels[i],gap*i+gap/2,H-8);
+        ctx.fillStyle='rgba(255,255,255,0.35)';
+        ctx.fillText(data[i].toLocaleString(),gap*i+gap/2,y-8);
+    }
+}
+</script>
+</body>
+</html>

@@ -26,6 +26,16 @@ async def home():
     return FileResponse(HOME_DIR / "index.html", media_type="text/html")
 
 
+@app.get("/eva-api")
+async def eva_api():
+    return FileResponse(HOME_DIR / "eva-api.html", media_type="text/html")
+
+
+@app.get("/demo")
+async def demo():
+    return FileResponse(HOME_DIR / "demo.html", media_type="text/html")
+
+
 app.mount("/home/static", StaticFiles(directory=HOME_DIR), name="home-static")
 
 try:

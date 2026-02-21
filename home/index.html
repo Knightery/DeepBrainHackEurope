@@ -25,7 +25,7 @@
             backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
             box-shadow: 0 1px 0 rgba(255,255,255,0.06);
         }
-        .logo img { height: 28px; display: block; filter: brightness(1.1); }
+        .logo img { height: 40px; display: block; filter: brightness(1.1); }
         .btn-launch {
             display: inline-flex; align-items: center; gap: 6px;
             padding: 9px 22px; background: #fff; color: #000;
@@ -91,7 +91,10 @@
 
     <nav id="navbar">
         <a class="logo" href="/home"><img src="/home/static/Anyquant_banner.png" alt="Anyquant"></a>
-        <a href="/app" class="btn-launch">Launch App <span>→</span></a>
+        <div style="display:flex;align-items:center;gap:24px;">
+            <a href="/eva-api" style="color:rgba(255,255,255,0.6);text-decoration:none;font-size:0.88rem;font-weight:500;transition:color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='rgba(255,255,255,0.6)'">Eva API</a>
+            <a href="/app" class="btn-launch">Launch App <span>→</span></a>
+        </div>
     </nav>
 
     <div class="scroll-indicator" id="scrollIndicator">
