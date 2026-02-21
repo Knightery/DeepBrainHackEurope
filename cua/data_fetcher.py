@@ -16,7 +16,21 @@ from pathlib import Path
 from computer_use_demo.loop import sampling_loop, APIProvider
 from computer_use_demo.tools import ToolResult
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 DOWNLOADS_DIR = Path("/home/computeruse/Downloads")
+
+MODEL_TO_TOOL_VERSION = {
+    "claude-sonnet-4-5-20250929": "computer_use_20250124",
+    "claude-haiku-4-5-20251001": "computer_use_20250124",
+}
+
+DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
 SYSTEM_PROMPT = """You are a Data Fetcher agent for a quant pitch evaluation platform.
 Your job is to navigate to a URL and extract data from it.
@@ -46,6 +60,9 @@ async def run_data_fetcher(url: str, description: str = "") -> dict:
     """
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
+    model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    tool_version = os.environ.get("CUA_TOOL_VERSION", MODEL_TO_TOOL_VERSION.get(model, "computer_use_20250124"))
+
     task = f"Navigate to this URL and fetch the data:\n\nURL: {url}\n"
     if description:
         task += f"Description: {description}\n"
@@ -54,20 +71,22 @@ async def run_data_fetcher(url: str, description: str = "") -> dict:
     messages = [{"role": "user", "content": task}]
 
     print(f"[CUA] Starting data fetch from: {url}")
+    print(f"[CUA] Model: {model} | Tool version: {tool_version}")
 
     # Use Anthropic's official sampling loop — it handles
     # screenshots, clicking, typing, bash, text editor, coordinate
     # scaling, and the full agent loop automatically.
     response_messages = await sampling_loop(
-        model="claude-sonnet-4-6",
+        model=model,
         provider=APIProvider.ANTHROPIC,
         system_prompt_suffix=SYSTEM_PROMPT,
         messages=messages,
         output_callback=lambda msg: print(f"[CUA] {_format_output(msg)}"),
         tool_output_callback=lambda result, id: print(f"[CUA] Tool result: {_format_tool_result(result)}"),
-        api_response_callback=lambda resp, msgs: None,
+        api_response_callback=lambda request, response, error: None,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=4096,
+        tool_version=tool_version,
     )
 
     # Extract final text from Claude's last message

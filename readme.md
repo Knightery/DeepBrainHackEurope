@@ -1,172 +1,96 @@
-Note for LLMs: ALWAYS FOLLOW kiss, yAgni and Solid principles.
-
 # Quant Pitch Evaluator
 
-**Thesis:** Democratize quantitative trading. Let anyone — regardless of geography, pedigree, or access — submit a quantitative stock pitch and receive real capital allocation.
+High-level overview of the project. For implementation contracts and detailed rules, see [MVP_SPEC.md](MVP_SPEC.md).
 
-> "I am, somehow, less interested in the weight and convolutions of Einstein's brain than in the near certainty that people of equal talent have lived and died in cotton fields and sweatshops."
+## Mission
 
----
+Quant Pitch Evaluator helps strong independent quants submit stock ideas and get evaluated with a transparent, structured process that can lead to capital allocation.
 
-## What is a Quant Pitch?
+## What the product does
 
-A data-driven argument that a stock is mispriced, backed by quantitative evidence.
+- Collects a pitch through an interactive chat workflow.
+- Standardizes core inputs (thesis, horizon, stocks, methodology, sources).
+- Runs parallel evaluators to assess data quality, methodology risk, and performance metrics.
+- Produces a final score, recommendation, and allocation amount.
+- Supports final human reviewer approval or rejection.
 
-**Example:** A user discovers a correlation between wheat futures in India and McDonald's stock price. They see a drought forecast in 4 days that hasn't been priced in. They submit their data, methodology, and thesis — and our system evaluates whether the pitch is sound.
+## User experience (MVP)
 
----
+1. User starts chat onboarding.
+2. Clarifier agent guides completion of a checklist.
+3. User provides:
+   - thesis,
+   - time horizon (`days`, `weeks`, `months`, `years`),
+   - stock ticker(s) (just symbols like `AAPL, MSFT`),
+   - methodology summary,
+   - source URL(s) for submitted data.
+4. User can upload supporting files.
+5. Evaluation runs when all mandatory checklist items are complete.
+6. Evaluation outcome:
+   - fabricated/cheating signal -> `Goodbye.`
+   - missing/unclear validation aspects -> clarification loop and `/validate`
+   - clean validation -> ready for final review with `Congrats!`
+7. User receives score + report + allocation recommendation once ready for final review.
 
-## Who is this for?
+## Why this structure
 
-- Sharp traders in developing countries missed by traditional quant firm recruiting pipelines
-- Quantitative thinkers who would otherwise lose money retail trading or on prop firm forex
-- Anyone with a data-driven insight and no institutional access
+- Keeps onboarding simple for users.
+- Preserves minimum standardization for reliable quant evaluation.
+- Enforces data provenance (source URLs required).
+- Makes missing fields explicit and actionable.
 
----
+## Current app status
 
-## How it works
+- Interactive Chainlit app is live.
+- Local scoring and reporting are implemented.
+- Checklist-style readiness and mandatory gates are implemented.
+- Some advanced fetcher/auditor integrations remain MVP+ work.
 
-### User Flow
-1. User opens the web form and talks with an interactive agent
-2. The agent guides them through submitting their pitch:
-   - Strategy description / thesis
-   - Supporting data (CSVs, notebooks, any format)
-   - Data sources and methodology
-   - Time horizon (user picks: days, weeks, months)
-3. Agents evaluate the pitch **in parallel**
-4. Results: a score, a report, and a dollar allocation amount
-5. Final step: human review
+## Key docs
 
-### Agent Pipeline
+- Product setup and local run: [README_CHAINLIT.md](README_CHAINLIT.md)
+- Detailed product and engineering spec: [MVP_SPEC.md](MVP_SPEC.md)
+- Chainlit user-facing instructions: [chainlit.md](chainlit.md)
 
-| Agent | Role | Runs when |
-|-------|------|-----------|
-| **Clarifier Agent** | Interactive Q&A — guides pitch submission, asks about data sources, clarifies assumptions, fills in gaps | During submission (interactive) |
-| **Data Fetcher** | Fetches stock data programmatically using the **Alpaca API**. Also uses Claude **Computer Use** to open a real browser, navigate to alternative data source URLs the user provided, and download/scrape the actual data. Verifies that the user's submitted data matches the source. | After submission (async) |
-| **Data Validator** | Is the data real? Check for fabricated price series, survivorship bias, look-ahead bias, data integrity | Parallel evaluation |
-| **Pipeline Auditor** | Any problems with the ML/analysis pipeline? Check for overfitting, data leakage, lack of walk-forward validation, p-hacking. Uses extended thinking. | Parallel evaluation |
-| **Scoring Agent** | Computes metrics: Sharpe ratio, max drawdown, risk assessment, time to return. Returns structured JSON with dollar allocation amount. | Parallel evaluation |
+## Quick start
 
-### Output
-- Per-pitch score across key metrics
-- Written evaluation report with flagged issues
-- Dollar amount of capital allocated (or rejection with reasons)
-- Passed to human reviewer for final decision
-
----
-
-## Metrics (in progress)
-
-- Sharpe ratio
-- Max drawdown
-- Risk score
-- Time to return
-- (More being defined by team)
-
----
-
-## Tech Stack
-
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Backend | Python (FastAPI) | Standard, fast, async-friendly |
-| Agent framework | Anthropic Agent SDK | Official multi-agent orchestration — handles handoffs, tool use, guardrails |
-| Agent LLM | Claude API with **tool use + structured outputs + extended thinking** | Agents call real Python functions, return typed JSON, and reason deeply |
-| Data Fetcher | **Alpaca API** for stock data + Claude **Computer Use** (beta) | Alpaca provides programmatic access to stock market data; Computer Use handles alternate data sources |
-| Data handling | Pandas, file-based storage | |
-| Frontend | **Chainlit** | Rapid deployment of interactive agent chat UI with streaming support |
-| Database | File-based / in-memory (hackathon) | |
-
-### Claude API features we use
-
-| Feature | Where | What it does |
-|---------|-------|-------------|
-| **Tool use** | All agents | Claude calls Python functions — validate CSVs, compute Sharpe, query APIs. The agent decides when to call what. |
-| **Structured outputs** | Scoring Agent | Forces JSON: `{"sharpe": 1.4, "max_drawdown": -0.12, "allocation_usd": 5000}`. No parsing needed. |
-| **Extended thinking** | Pipeline Auditor, Data Validator | Claude reasons step-by-step before responding. Critical for catching overfitting and data leakage. |
-| **Computer Use** | Data Fetcher Agent | Claude controls a real browser — navigates to the data source URL the user provides, finds the data, downloads it. |
-| **Multi-turn streaming** | Clarifier Agent + Chainlit | Real-time chat in the Chainlit web interface. |
-| **Prompt caching** | All agents | Agent system prompts are long and reused. Caching cuts cost and latency. |
-
-### Sponsor tech worth integrating
-
-| Sponsor | How we could use it |
-|---------|-------------------|
-| **Anthropic (Claude)** | Core LLM for all agents + Computer Use for data fetching |
-| **Hugging Face** | Pre-trained models for data validation, anomaly detection in submitted datasets |
-| **Stripe / Paid** | Payment rails for capital allocation; Paid's outcome-based billing fits our model |
-| **Chainlit** | Interactive web UI for agent chat, streaming, and pitch submission interface |
-| **SIG (Susquehanna)** | Domain alignment — our product directly serves their world (quant trading) |
-
----
-
-## Architecture
-
-```
-User (web form)
-    │
-    ▼
-Clarifier Agent (interactive chat, multi-turn streaming)
-    │  collects: thesis, data files, data source URLs, methodology, time horizon
-    │
-    ▼
-┌──────────────────────────────────────────────────┐
-│              Parallel Evaluation                  │
-│                                                   │
-│  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ Data Fetcher │  │    Data Validator         │  │
-│  │ (Computer    │  │    (checks integrity,     │  │
-│  │  Use — real  │  │     bias, fabrication)    │  │
-│  │  browser)    │  │                           │  │
-│  └──────┬───────┘  └──────────────────────────┘  │
-│         │                                         │
-│         │ fetched data compared                   │
-│         ▼ against submitted data                  │
-│  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │  Pipeline    │  │    Scoring Agent          │  │
-│  │  Auditor     │  │    (Sharpe, drawdown,     │  │
-│  │  (extended   │  │     risk → $ allocation)  │  │
-│  │   thinking)  │  │    [structured JSON]      │  │
-│  └──────────────┘  └──────────────────────────┘  │
-└──────────────────────────────────────────────────┘
-    │
-    ▼
-Aggregated Report + Dollar Allocation
-    │
-    ▼
-Human Review
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+chainlit run app.py
 ```
 
----
+Model configuration is environment-driven:
 
-## What needs to be built
+- App + evaluators read `GEMINI_MODEL` from `.env`.
+- CUA fetcher reads `ANTHROPIC_MODEL` from `.env`.
 
-### Phase 1: Core Backend
-- [ ] FastAPI server with pitch submission endpoint
-- [ ] Data ingestion — accept CSVs and other file formats, standardize into internal format
-- [ ] Clarifier agent — interactive multi-turn chat that guides user through pitch submission
-- [ ] Data Fetcher agent — Computer Use browser automation to fetch data from user-provided source URLs
-- [ ] Data Validator agent — checks data integrity, bias, fabrication
-- [ ] Pipeline Auditor agent — checks methodology for overfitting, leakage, etc. (extended thinking)
-- [ ] Scoring agent — structured JSON output with Sharpe, drawdown, risk, allocation
-- [ ] Aggregator — combines agent outputs into final report + allocation
+## Optional: CUA data fetcher (Docker)
 
-### Phase 2: Frontend
-- [ ] Interactive web form with agent chat interface (streaming)
-- [ ] File upload (CSV, notebooks, docs)
-- [ ] Results display — score, report, allocation amount
+The `cua/` folder contains an optional Computer Use Agent runner based on Anthropic's
+official `computer-use-demo` image.
 
-### Phase 3: Polish
-- [ ] Data standardization pipeline (handle messy real-world uploads)
-- [ ] Human review dashboard
-- [ ] Example demo pitch (wheat/India/McDonald's scenario)
-- [ ] Data Fetcher cross-checks submitted data against source data
+Use Docker Compose from inside `cua/`:
 
----
+```powershell
+cd cua
+docker compose build
+docker compose run --rm --remove-orphans data-fetcher "https://www.netflix.com/tudum/top10" "Fetch global top 10 lists"
+```
 
-## Open Questions
+Watch the live desktop at `http://localhost:6080`.
 
-- Exact scoring formula and metric weights
-- Data standardization format (what's the canonical internal schema?)
-- Capital allocation formula (score → dollar amount mapping)
-- Computer Use environment: Docker container vs. cloud VM for the browser sandbox
+Model selection:
+
+- Default is `claude-sonnet-4-5-20250929` (recommended for stronger web navigation reliability).
+- For cheaper testing, set `ANTHROPIC_MODEL=claude-haiku-4-5-20251001`.
+- Tool version is auto-paired in `cua/data_fetcher.py`, or can be overridden with `CUA_TOOL_VERSION`.
+
+Important: `docker run build` is not a valid build command. Use `docker compose build` (or `docker build`).
+
+## Principles
+
+- Keep user inputs minimal but meaningful.
+- Keep scoring deterministic in MVP.
+- Prefer clarity and auditability over complexity.

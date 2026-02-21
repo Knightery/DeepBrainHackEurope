@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import chainlit as cl
-from anthropic import Anthropic
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 from pitch_engine import (
     PitchDraft,
@@ -48,7 +48,8 @@ COMMANDS_TEXT = """
 Commands:
 - `/status` show current pitch completeness
 - `/checklist` show onboarding checklist
-- `/evaluate` run v0 scoring and allocation
+- `/evaluate` run validation and scoring
+- `/validate` re-run the validation loop after clarifications
 - `/reset` start a new pitch
 - `/help` show commands
 """.strip()
@@ -58,19 +59,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _anthropic_model() -> str:
+def _gemini_model() -> str:
     import os
 
-    return os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+    return os.getenv("GEMINI_MODEL", "gemini-3.1-pro")
 
 
-def _get_client() -> Anthropic | None:
+def _get_client() -> genai.GenerativeModel | None:
     import os
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
     if not api_key:
         return None
-    return Anthropic(api_key=api_key)
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(
+        model_name=_gemini_model(),
+        system_instruction=SYSTEM_PROMPT,
+    )
 
 
 def _pitch_dir(pitch_id: str) -> Path:
@@ -133,6 +138,27 @@ def _set_session_history(history: list[dict[str, str]]) -> None:
     cl.user_session.set("llm_history", history[-16:])
 
 
+def _session_validation_context() -> list[str]:
+    return cl.user_session.get("validation_context", [])
+
+
+def _set_session_validation_context(items: list[str]) -> None:
+    cl.user_session.set("validation_context", items[-3:])
+
+
+def _apply_clarification_update(draft: PitchDraft, user_text: str) -> None:
+    if draft.status != "needs_clarification":
+        return
+    text = user_text.strip()
+    if not text:
+        return
+    # Preserve concise clarification evidence for validator reruns.
+    if draft.methodology_summary:
+        draft.methodology_summary = f"{draft.methodology_summary}\n\nClarification:\n{text}"
+    else:
+        draft.methodology_summary = text
+
+
 def _status_markdown(draft: PitchDraft) -> str:
     missing = draft.missing_fields()
     files = ", ".join(file.name for file in draft.uploaded_files) if draft.uploaded_files else "(none)"
@@ -193,24 +219,27 @@ async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> str:
     if client is None:
         return _local_clarifier_reply(draft)
 
-    context_payload = json.dumps(draft.to_llm_context(), ensure_ascii=True)
-    wrapped_input = f"PITCH_CONTEXT={context_payload}\nUSER_MESSAGE={user_text}"
+    context = draft.to_llm_context()
+    context["validation_context"] = _session_validation_context()
+    context_payload = json.dumps(context, ensure_ascii=True)
     history = _session_history()
-    history.append({"role": "user", "content": wrapped_input})
+    history.append({"role": "user", "content": user_text})
+    history_text = "\n".join(f"{item['role'].upper()}: {item['content']}" for item in history[-10:])
+    prompt = (
+        "You are in a running clarifier conversation. Use current structured context and recent dialogue.\n\n"
+        f"CURRENT_PITCH_CONTEXT={context_payload}\n\n"
+        f"RECENT_TURNS=\n{history_text}"
+    )
 
     try:
-        response = await cl.make_async(client.messages.create)(
-            model=_anthropic_model(),
-            max_tokens=700,
-            temperature=0.2,
-            system=SYSTEM_PROMPT,
-            messages=history,
+        response = await cl.make_async(client.generate_content)(
+            prompt,
+            generation_config={
+                "temperature": 0.2,
+                "max_output_tokens": 700,
+            },
         )
-        blocks = []
-        for block in response.content:
-            if getattr(block, "type", None) == "text":
-                blocks.append(getattr(block, "text", ""))
-        raw_text = "\n".join(blocks).strip()
+        raw_text = (getattr(response, "text", "") or "").strip()
         extracted = extract_tagged_json(raw_text, "pitch_state")
         if extracted:
             draft.merge_structured_update(extracted)
@@ -220,7 +249,7 @@ async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> str:
         return assistant_text
     except Exception as exc:
         fallback = (
-            "Anthropic call failed for this turn, so I used local intake mode. "
+            "Gemini call failed for this turn, so I used local intake mode. "
             f"Error: {exc.__class__.__name__}"
         )
         history.append({"role": "assistant", "content": fallback})
@@ -264,7 +293,20 @@ def _ingest_message_files(draft: PitchDraft, message: cl.Message) -> list[str]:
     return added
 
 
-async def _handle_evaluate_command(draft: PitchDraft) -> None:
+def _validation_followup_markdown(summary: str, questions: list[str]) -> str:
+    lines = [
+        "## Validation Follow-up",
+        f"- Summary: {summary}",
+    ]
+    if questions:
+        lines.append("- Please clarify the following:")
+        for idx, question in enumerate(questions, start=1):
+            lines.append(f"  {idx}. {question}")
+    lines.append("- After updates, run `/validate` to re-run this loop.")
+    return "\n".join(lines)
+
+
+async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/evaluate") -> None:
     if not draft.ready_for_evaluation():
         await cl.Message(
             content=(
@@ -278,14 +320,47 @@ async def _handle_evaluate_command(draft: PitchDraft) -> None:
     _save_pitch_snapshot(draft)
     _append_chat_event(draft, "system", "Evaluation started.")
 
-    result = evaluate_pitch(draft)
-    draft.status = "completed"
+    try:
+        result = evaluate_pitch(draft)
+    except Exception as exc:
+        draft.status = "failed"
+        _save_pitch_snapshot(draft)
+        _append_chat_event(draft, "system", f"{command_name} failed. Error={exc.__class__.__name__}")
+        await cl.Message(
+            content=(
+                "Evaluation failed because validator agents could not run.\n"
+                "Please ensure `GOOGLE_API_KEY` is configured and retry."
+            )
+        ).send()
+        return
+    if result.validation_outcome == "blocked_fabrication":
+        draft.status = "rejected"
+    elif result.validation_outcome == "needs_clarification":
+        draft.status = "needs_clarification"
+    else:
+        draft.status = "ready_for_final_review"
     _save_pitch_snapshot(draft)
 
     result_path = _pitch_dir(draft.pitch_id) / "result.json"
     _write_json(result_path, result.to_dict())
-    _append_chat_event(draft, "system", f"Evaluation complete. Decision={result.decision}")
+    _append_chat_event(draft, "system", f"{command_name} complete. Decision={result.decision}")
 
+    if result.validation_outcome == "blocked_fabrication":
+        _set_session_validation_context([])
+        await cl.Message(content="Goodbye.").send()
+        return
+
+    if result.validation_outcome == "needs_clarification":
+        context_items = _session_validation_context()
+        context_items.append(result.validation_summary)
+        _set_session_validation_context(context_items)
+        await cl.Message(
+            content=_validation_followup_markdown(result.validation_summary, result.validation_questions)
+        ).send()
+        return
+
+    _set_session_validation_context([])
+    await cl.Message(content="Congrats! Ready for final review.").send()
     await cl.Message(content=result.report_markdown).send()
 
 
@@ -295,6 +370,7 @@ async def on_chat_start() -> None:
     draft = _new_pitch()
     _set_session_draft(draft)
     _set_session_history([])
+    _set_session_validation_context([])
     _save_pitch_snapshot(draft)
 
     greeting = (
@@ -307,7 +383,7 @@ async def on_chat_start() -> None:
     await cl.Message(content=_checklist_markdown(draft)).send()
     if _get_client() is None:
         await cl.Message(
-            content="`ANTHROPIC_API_KEY` is not detected. Running in local clarifier mode only."
+            content="`GOOGLE_API_KEY` is not detected. Running in local clarifier mode only."
         ).send()
 
 
@@ -336,12 +412,16 @@ async def on_message(message: cl.Message) -> None:
             await cl.Message(content=_checklist_markdown(draft)).send()
             return
         if command == "/evaluate":
-            await _handle_evaluate_command(draft)
+            await _handle_evaluate_command(draft, "/evaluate")
+            return
+        if command == "/validate":
+            await _handle_evaluate_command(draft, "/validate")
             return
         if command == "/reset":
             new_draft = _new_pitch()
             _set_session_draft(new_draft)
             _set_session_history([])
+            _set_session_validation_context([])
             _save_pitch_snapshot(new_draft)
             await cl.Message(content=f"Started a new pitch: `{new_draft.pitch_id}`").send()
             return
@@ -351,6 +431,7 @@ async def on_message(message: cl.Message) -> None:
     if content:
         _append_chat_event(draft, "user", content)
         heuristic_update_from_user_text(draft, content)
+        _apply_clarification_update(draft, content)
 
     if content:
         assistant_reply = await _run_clarifier_turn(draft, content)

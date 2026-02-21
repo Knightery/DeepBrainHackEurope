@@ -13,9 +13,9 @@ pip install -r requirements.txt
 `.env` must include:
 
 ```env
-ANTHROPIC_API_KEY=your_key_here
+GOOGLE_API_KEY=your_key_here
 # optional
-ANTHROPIC_MODEL=claude-3-5-sonnet-latest
+GEMINI_MODEL=gemini-3.1-pro
 ```
 
 ## 3) Run the app
@@ -28,7 +28,7 @@ Then open the local URL shown by Chainlit.
 
 ## Notes
 
-- `cua/` is intentionally not touched by this app.
+- `cua/` is intentionally not touched by this app and still uses Anthropic credentials.
 - Uploaded files and session artifacts are written under `data/pitches/{pitch_id}`.
 - Files are uploaded from the normal chat attachment UI (no `/upload` command).
 - Evaluation requires: thesis, time horizon (`days|weeks|months|years`), stock tickers, methodology summary, and source URL(s).

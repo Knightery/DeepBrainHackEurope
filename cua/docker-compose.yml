@@ -4,10 +4,7 @@ services:
     env_file:
       - ../.env
     ports:
-      - "5900:5900"   # VNC — watch live with any VNC viewer
-      - "6080:6080"   # noVNC — watch live in browser at http://localhost:6080
-      - "8080:8080"   # Streamlit UI (Anthropic's built-in)
-      - "8501:8501"   # Streamlit alt port
+      - "5900:5900"   # VNC
+      - "6080:6080"   # noVNC — watch in browser at http://localhost:6080
     volumes:
       - ./downloads:/home/computeruse/Downloads
-    entrypoint: ["python", "/app/data_fetcher.py"]

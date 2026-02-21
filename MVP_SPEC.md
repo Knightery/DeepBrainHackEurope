@@ -1,53 +1,58 @@
-# Quant Pitch Evaluator - MVP Spec (v0)
+# Quant Pitch Evaluator - MVP Spec (Detailed Overview)
 
-## 1) Goal
+This is the implementation contract for MVP behavior, data requirements, and service responsibilities.
 
-Ship a hackathon-grade end-to-end system that:
-- accepts one quant pitch with files + source URLs,
-- runs 4 async evaluators (Data Fetcher, Data Validator, Pipeline Auditor, Scoring),
-- produces one aggregate report + allocation recommendation,
-- supports final human approval or rejection.
+## 1) Objective
 
-This document defines contracts that are concrete enough to implement immediately.
+Ship a working end-to-end system that:
+- accepts one quant pitch,
+- runs parallel evaluators,
+- returns one aggregate report + allocation recommendation,
+- supports final human review.
 
-## 2) MVP Scope and Non-Goals
+## 2) Scope
 
-In scope:
-- FastAPI backend with REST endpoints.
-- File upload + basic metadata ingestion.
-- Clarifier chat endpoint (single model, persisted history).
-- Parallel evaluator execution with timeout/retry.
-- Deterministic v0 scoring and allocation policy.
-- File-based persistence and audit logs.
-- Minimal reviewer actions (approve/reject with note).
+### In scope (MVP)
+- Chainlit intake flow with clarifier interactions.
+- File upload and metadata persistence.
+- Checklist-style onboarding and readiness gates.
+- Deterministic v0 scoring and allocation.
+- Parallel evaluator outputs with unified envelope.
+- Reviewer approve/reject action with persisted result.
 
-Out of scope for MVP:
-- Production auth/RBAC.
-- Brokerage execution and real money movement.
-- Full historical backtest platform.
-- Advanced anti-fraud ML models.
-- Multi-tenant scaling and HA.
+### Out of scope (MVP)
+- Brokerage execution and real-money movement.
+- Production auth/RBAC and multi-tenant scaling.
+- Full backtesting platform.
+- Advanced anti-fraud ML systems.
 
-## 3) Architecture (MVP)
+## 3) User Intake Contract (Mandatory)
 
-Flow:
-1. User creates pitch and uploads files/metadata.
-2. User exchanges clarifier messages until ready.
-3. User triggers evaluation.
-4. Orchestrator runs evaluators in parallel.
-5. Aggregator computes final score/allocation and writes report.
-6. Human reviewer approves or rejects.
+Evaluation is blocked until all mandatory items are provided.
 
-Core services:
-- `api`: FastAPI routes + request validation.
-- `orchestrator`: fan-out/fan-in async execution.
-- `agents`: wrappers around Claude tools/prompts.
-- `scoring`: deterministic formula library.
-- `storage`: local filesystem repository.
+1. **Thesis**: concise statement of what is mispriced and why.
+2. **Time horizon**: one of `days`, `weeks`, `months`, `years`.
+3. **Stock tickers**: one or more symbols (e.g., `AAPL`, `MSFT`).
+4. **Methodology summary**: data used, signal idea, and validation approach.
+5. **Source URLs**: source URL(s) for submitted data (provenance requirement).
 
-## 4) Canonical Data Contracts
+Notes:
+- Supporting file uploads are optional but recommended.
+- If data is missing or unclear, clarifier asks follow-ups before evaluation.
 
-### 4.1 Pitch Entity
+## 4) State Machine
+
+Pitch statuses:
+- `draft` -> `ready` -> `running` -> `needs_clarification|ready_for_final_review|rejected`
+- reviewer path: `ready_for_final_review` -> `approved|rejected`
+- failure path: `running` -> `failed`
+
+Rules:
+- `ready` only when mandatory checklist passes.
+- `/evaluate` must hard-block when mandatory fields are missing.
+- `/validate` re-runs validation after user clarifications.
+
+## 5) Canonical Pitch Entity
 
 ```json
 {
@@ -59,7 +64,8 @@ Core services:
     "country": "IN"
   },
   "thesis": "string",
-  "time_horizon": "days|weeks|months",
+  "time_horizon": "days|weeks|months|years",
+  "tickers": ["AAPL", "MSFT"],
   "source_urls": ["https://..."],
   "methodology_summary": "string",
   "uploaded_files": [
@@ -74,27 +80,27 @@ Core services:
 }
 ```
 
-### 4.2 Canonical Timeseries Schema (internal)
+## 6) Canonical Timeseries Schema (Internal)
 
-Required columns:
+Required columns (or mappable equivalents):
 - `timestamp_utc` (ISO8601 datetime)
 - `symbol` (string)
 - `close` (float)
 
 Optional columns:
-- `open`, `high`, `low`, `volume`, `adj_close` (float)
-- `feature_name` (string), `feature_value` (float) for exogenous features
-- `source_url` (string)
+- `open`, `high`, `low`, `volume`, `adj_close`
+- exogenous features (`feature_name`, `feature_value`)
+- `source_url`
 
 Validation rules:
-- timestamps must be monotonic per symbol,
+- monotonic timestamps per symbol,
 - no duplicate `(symbol, timestamp_utc)`,
 - numeric columns parseable and finite,
-- minimum 30 rows total for scoring.
+- minimum 30 valid rows for scoring.
 
-### 4.3 Agent Output Envelope
+## 7) Agent Output Envelope (Required)
 
-All agents must return this envelope:
+All evaluators return:
 
 ```json
 {
@@ -114,194 +120,58 @@ All agents must return this envelope:
 }
 ```
 
-## 5) API Spec (FastAPI)
+## 8) Evaluator Responsibilities
 
-Base path: `/v1`
-
-### 5.1 Create Pitch
-
-- `POST /v1/pitches`
-- Content type: `multipart/form-data`
-- Fields:
-  - `metadata` (JSON string with thesis, horizon, methodology, source_urls, submitter)
-  - `files[]` (0..10 files, each max 25 MB)
-- Response `201`:
-
-```json
-{
-  "pitch_id": "pit_...",
-  "status": "draft"
-}
-```
-
-### 5.2 Get Pitch
-
-- `GET /v1/pitches/{pitch_id}`
-- Response `200`: full pitch record + current status.
-
-### 5.3 Clarifier Chat Turn
-
-- `POST /v1/pitches/{pitch_id}/clarifier/messages`
-- Request:
-
-```json
-{
-  "message": "user text",
-  "stream": true
-}
-```
-
-- Response `200`:
-
-```json
-{
-  "assistant_message": "string",
-  "missing_fields": ["methodology_summary", "source_urls"],
-  "ready_for_evaluation": false
-}
-```
-
-### 5.4 Trigger Evaluation
-
-- `POST /v1/pitches/{pitch_id}/evaluate`
-- Idempotent: if already `running`, return current run id.
-- Response `202`:
-
-```json
-{
-  "pitch_id": "pit_...",
-  "run_id": "run_...",
-  "status": "running"
-}
-```
-
-### 5.5 Get Evaluation Result
-
-- `GET /v1/pitches/{pitch_id}/result`
-- Response `200` when complete:
-
-```json
-{
-  "pitch_id": "pit_...",
-  "status": "completed",
-  "overall_score": 78.4,
-  "allocation_usd": 5000,
-  "decision": "recommend_allocate",
-  "agent_outputs": {},
-  "report_markdown": "..."
-}
-```
-
-If incomplete, return `202` with status.
-
-### 5.6 Reviewer Decision
-
-- `POST /v1/pitches/{pitch_id}/review`
-- Request:
-
-```json
-{
-  "reviewer_id": "rev_1",
-  "decision": "approve|reject",
-  "note": "string"
-}
-```
-
-- Response `200` with final status.
-
-## 6) Orchestration and State Machine
-
-Pitch statuses:
-- `draft` -> `ready` -> `running` -> `completed` -> `approved|rejected`
-- terminal failure path: `running` -> `failed`
-
-Evaluator runtime policy:
-- run in parallel: fetcher, validator, auditor, scoring.
-- per-agent timeout: 8 minutes.
-- retry policy: 1 retry on transport/tool error only.
-- no retry on deterministic validation failures.
-
-Fan-in aggregation:
-- wait for all agent completions or hard timeout.
-- if any agent returns `fail` with critical flag, mark decision as reject candidate.
-- always produce a final report, even on partial failure.
-
-## 7) Agent-Specific Contracts
-
-### 7.1 Data Fetcher
-
+### 8.1 Data Fetcher
 Inputs:
-- `source_urls`, submitted files metadata, pitch thesis.
+- `source_urls`, uploaded files metadata, thesis.
 
-Outputs in `artifacts`:
-- `fetched_files[]` with sha256,
-- `match_rate` in `[0,1]` comparing fetched vs submitted overlap,
-- `provenance_log[]` (url, timestamp, action).
+Outputs:
+- fetched artifacts,
+- source/provenance log,
+- submitted-vs-source match indicators.
 
-Critical flags:
+Critical examples:
 - `UNREACHABLE_SOURCE_ALL`
 - `SOURCE_MISMATCH_SEVERE`
+- `MISSING_SOURCE_URLS`
 
-### 7.2 Data Validator
-
+### 8.2 Data Validator
 Checks:
-- parse validity, missingness, outlier structure,
-- fabricated-series heuristics (flat segments, repeated blocks),
-- look-ahead and survivorship indicators.
+- parse integrity,
+- missingness and duplicates,
+- suspicious/fabricated series patterns,
+- schema sufficiency for scoring.
 
-Outputs in `artifacts`:
-- `data_quality_score` in `[0,1]`,
-- `row_count`, `symbol_count`,
-- `anomaly_summary`.
+Runtime outcomes:
+- `blocked_fabrication`: terminate user flow with `Goodbye.`
+- `needs_clarification`: emit concise issue summary + clarification questions for user loop
+- `ready_for_final_review`: no blocking concerns; proceed to final review
 
-Critical flags:
-- `DATA_FABRICATION_SUSPECTED`
+Critical examples:
 - `INSUFFICIENT_DATA`
+- `MISSING_PRICE_COLUMN`
+- `MISSING_TICKERS`
 
-### 7.3 Pipeline Auditor
-
+### 8.3 Pipeline Auditor
 Checks:
-- methodology consistency vs data/time horizon,
-- leakage risk, overfitting signals, p-hacking signs,
-- presence of out-of-sample or walk-forward narrative.
+- methodology clarity and consistency,
+- leakage/overfit risk signs,
+- evidence of robust validation framing.
 
-Outputs in `artifacts`:
-- `methodology_score` in `[0,1]`,
-- `required_followups[]`.
+### 8.4 Scoring
+Computes:
+- Sharpe,
+- max drawdown,
+- risk score,
+- time to return (nullable),
+- final score + allocation via deterministic formula.
 
-Critical flags:
-- `LEAKAGE_HIGH_RISK`
+## 9) Scoring & Allocation Policy (v0)
 
-### 7.4 Scoring Agent
+### 9.1 Composite score (0-100)
 
-Computes raw metrics from canonical data:
-- `sharpe`,
-- `max_drawdown`,
-- `risk_score` in `[0,1]` (higher is riskier),
-- `time_to_return_days` (nullable).
-
-Returns strict JSON only.
-
-## 8) v0 Scoring and Allocation Policy
-
-## 8.1 Normalizations
-
-Given:
-- `sharpe`
-- `max_drawdown` (negative value, example `-0.25`)
-- `risk_score` in `[0,1]`
-- `data_quality_score` in `[0,1]`
-- `methodology_score` in `[0,1]`
-- `match_rate` in `[0,1]`
-
-Normalize:
-- `sharpe_n = clamp((sharpe + 1.0) / 3.0, 0, 1)` (maps -1..2 to 0..1)
-- `drawdown_n = 1 - clamp(abs(max_drawdown) / 0.60, 0, 1)`
-- `risk_n = 1 - risk_score`
-
-## 8.2 Composite Score (0-100)
-
-```
+```text
 score = 100 * (
   0.30 * sharpe_n +
   0.20 * drawdown_n +
@@ -312,43 +182,64 @@ score = 100 * (
 )
 ```
 
-Round to 1 decimal.
-
-## 8.3 Hard Reject Rules
-
-Allocation is forced to `0` if any:
-- critical flag from validator/auditor/fetcher,
+### 9.2 Hard reject rules
+Allocation is forced to `0` when any critical condition occurs, including:
+- missing mandatory intake fields,
 - fewer than 30 valid rows,
-- no valid source URL and no uploaded dataset.
+- critical validator/fetcher/auditor flags.
 
-## 8.4 Allocation Ladder (USD)
+Clarification-loop rule:
+- If outcome is `needs_clarification`, allocation remains `0` until user resolves issues and passes `/validate`.
 
+### 9.3 Allocation ladder (USD)
 If not hard-rejected:
-- `< 55`: `0` (reject)
+- `<55`: `0`
 - `55-64.9`: `1000`
 - `65-74.9`: `2500`
 - `75-84.9`: `5000`
 - `85-92.9`: `10000`
-- `>= 93`: `15000`
+- `>=93`: `15000`
 
 Horizon multiplier:
 - `days`: `0.8`
 - `weeks`: `1.0`
 - `months`: `1.2`
+- `years`: `1.4`
 
-Final allocation:
+Final:
 - `allocation = min(20000, round_to_100(base * multiplier))`
 
-## 9) Storage Layout (Filesystem)
+## 10) APIs (MVP shape)
 
-```
+Base path: `/v1`
+
+- `POST /pitches`: create draft with metadata/files.
+- `GET /pitches/{pitch_id}`: fetch pitch + status.
+- `POST /pitches/{pitch_id}/clarifier/messages`: chat turn + missing fields.
+- `POST /pitches/{pitch_id}/evaluate`: trigger run (idempotent while running).
+- `GET /pitches/{pitch_id}/result`: fetch result when complete.
+- `POST /pitches/{pitch_id}/review`: approve/reject with note.
+
+Clarifier response must expose:
+- `assistant_message`
+- `missing_fields`
+- `ready_for_evaluation`
+
+Validation loop behavior:
+- `/evaluate` runs both validation agents.
+- If non-fabrication issues exist, user gets a compact summary + follow-up questions.
+- User can answer in chat, then run `/validate` to re-run only from summarized context.
+- Only concise validation summaries are fed back into the user-facing clarifier context.
+
+## 11) Storage Layout
+
+```text
 data/
   pitches/
     {pitch_id}/
       pitch.json
       clarifier_history.jsonl
       uploads/
-      fetched/
       agent_outputs/
         data_fetcher.json
         data_validator.json
@@ -356,50 +247,29 @@ data/
         scoring.json
       result.json
       review.json
-      audit.log
 ```
 
-Audit log line format:
-- `timestamp_utc | level | pitch_id | component | message | context_json`
+## 12) Reliability and Security Baseline
 
-## 10) Security and Reliability Baseline
-
-- File allowlist: `.csv`, `.tsv`, `.json`, `.txt`, `.ipynb`, `.pdf`.
-- Reject executable uploads.
-- Enforce max total upload size per pitch: 100 MB.
-- Do not execute uploaded notebooks.
-- Computer Use runs in isolated sandbox; no host filesystem mount.
+- Limit upload types and size caps.
+- Never execute uploaded notebooks.
+- Isolate browser/data-fetch runtime.
+- Log all external URL access attempts.
 - Redact secrets from logs.
-- Record all external URLs accessed by fetcher.
 
-## 11) Acceptance Criteria
+## 13) Acceptance Criteria
 
-MVP is done when:
-1. A user can submit a pitch with at least one CSV and one source URL.
-2. Clarifier returns missing-field prompts until ready.
-3. Evaluation endpoint triggers all 4 agents and stores outputs.
-4. Aggregator always returns a result payload with score and decision.
-5. Hard reject rules override allocation to zero.
-6. Reviewer can approve/reject and decision is persisted.
-7. A demo pitch run completes in under 10 minutes end-to-end.
+MVP is complete when:
+1. User can complete onboarding checklist in chat.
+2. `/evaluate` blocks until mandatory intake fields are complete.
+3. Evaluators produce normalized output envelopes.
+4. Result includes score, allocation, decision, and report.
+5. Hard-reject rules consistently force zero allocation.
+6. Reviewer decision is stored and queryable.
 
-## 12) Two-Day Build Sequence
+## 14) Build Priorities
 
-Day 1:
-1. Scaffold FastAPI app, models, filesystem repo, pitch CRUD.
-2. Implement `/pitches`, `/clarifier/messages`, `/evaluate`, `/result`.
-3. Add orchestrator with stubbed agent adapters and state transitions.
-4. Implement scoring/allocation library + unit tests for formulas.
-
-Day 2:
-1. Wire real Claude calls for clarifier + scoring agent first.
-2. Implement fetcher/validator/auditor minimal prompts and output schema checks.
-3. Add aggregation report generator and reviewer endpoint.
-4. Run one scripted demo pitch and patch contract mismatches.
-
-## 13) Open Items to Revisit After MVP
-
-- Replace file storage with Postgres + object storage.
-- Add auth, reviewer roles, and tamper-evident audit trails.
-- Expand anti-fraud models (time-series anomaly models).
-- Move from fixed ladder to portfolio-aware allocation optimizer.
+1. Keep intake UX simple and strict on mandatory fields.
+2. Keep scoring deterministic and debuggable.
+3. Keep all outputs auditable and recoverable from storage.
+4. Add advanced fetch/validation intelligence after core reliability is stable.
