@@ -1,3 +1,5 @@
+Note for LLMs: ALWAYS FOLLOW kiss, yAgni and Solid principles.
+
 # Quant Pitch Evaluator
 
 **Thesis:** Democratize quantitative trading. Let anyone — regardless of geography, pedigree, or access — submit a quantitative stock pitch and receive real capital allocation.
@@ -40,7 +42,7 @@ A data-driven argument that a stock is mispriced, backed by quantitative evidenc
 | Agent | Role | Runs when |
 |-------|------|-----------|
 | **Clarifier Agent** | Interactive Q&A — guides pitch submission, asks about data sources, clarifies assumptions, fills in gaps | During submission (interactive) |
-| **Data Fetcher** | Uses Claude **Computer Use** to open a real browser, navigate to the data source URL the user provided, and download/scrape the actual data. Verifies that the user's submitted data matches the source. | After submission (async) |
+| **Data Fetcher** | Fetches stock data programmatically using the **Alpaca API**. Also uses Claude **Computer Use** to open a real browser, navigate to alternative data source URLs the user provided, and download/scrape the actual data. Verifies that the user's submitted data matches the source. | After submission (async) |
 | **Data Validator** | Is the data real? Check for fabricated price series, survivorship bias, look-ahead bias, data integrity | Parallel evaluation |
 | **Pipeline Auditor** | Any problems with the ML/analysis pipeline? Check for overfitting, data leakage, lack of walk-forward validation, p-hacking. Uses extended thinking. | Parallel evaluation |
 | **Scoring Agent** | Computes metrics: Sharpe ratio, max drawdown, risk assessment, time to return. Returns structured JSON with dollar allocation amount. | Parallel evaluation |
@@ -70,9 +72,9 @@ A data-driven argument that a stock is mispriced, backed by quantitative evidenc
 | Backend | Python (FastAPI) | Standard, fast, async-friendly |
 | Agent framework | Anthropic Agent SDK | Official multi-agent orchestration — handles handoffs, tool use, guardrails |
 | Agent LLM | Claude API with **tool use + structured outputs + extended thinking** | Agents call real Python functions, return typed JSON, and reason deeply |
-| Data Fetcher | Claude **Computer Use** (beta) | Agent navigates real browsers to fetch data from user-provided sources |
+| Data Fetcher | **Alpaca API** for stock data + Claude **Computer Use** (beta) | Alpaca provides programmatic access to stock market data; Computer Use handles alternate data sources |
 | Data handling | Pandas, file-based storage | |
-| Frontend | Web form UI (interactive agent chat) | |
+| Frontend | **Chainlit** | Rapid deployment of interactive agent chat UI with streaming support |
 | Database | File-based / in-memory (hackathon) | |
 
 ### Claude API features we use
@@ -83,7 +85,7 @@ A data-driven argument that a stock is mispriced, backed by quantitative evidenc
 | **Structured outputs** | Scoring Agent | Forces JSON: `{"sharpe": 1.4, "max_drawdown": -0.12, "allocation_usd": 5000}`. No parsing needed. |
 | **Extended thinking** | Pipeline Auditor, Data Validator | Claude reasons step-by-step before responding. Critical for catching overfitting and data leakage. |
 | **Computer Use** | Data Fetcher Agent | Claude controls a real browser — navigates to the data source URL the user provides, finds the data, downloads it. |
-| **Multi-turn streaming** | Clarifier Agent | Real-time chat in the web form. |
+| **Multi-turn streaming** | Clarifier Agent + Chainlit | Real-time chat in the Chainlit web interface. |
 | **Prompt caching** | All agents | Agent system prompts are long and reused. Caching cuts cost and latency. |
 
 ### Sponsor tech worth integrating
@@ -93,7 +95,7 @@ A data-driven argument that a stock is mispriced, backed by quantitative evidenc
 | **Anthropic (Claude)** | Core LLM for all agents + Computer Use for data fetching |
 | **Hugging Face** | Pre-trained models for data validation, anomaly detection in submitted datasets |
 | **Stripe / Paid** | Payment rails for capital allocation; Paid's outcome-based billing fits our model |
-| **Lovable** | Rapid UI generation for the web form / pitch submission interface |
+| **Chainlit** | Interactive web UI for agent chat, streaming, and pitch submission interface |
 | **SIG (Susquehanna)** | Domain alignment — our product directly serves their world (quant trading) |
 
 ---
