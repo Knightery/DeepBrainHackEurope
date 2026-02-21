@@ -5,3 +5,5 @@ python-dotenv>=1.0.1
 dotenv
 pandas
 google
+fastapi
+uvicorn[standard]
