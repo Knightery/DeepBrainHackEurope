@@ -1,4 +1,4 @@
-# Quant Pitch Evaluator - MVP Spec (Detailed Overview)
+﻿# Quant Pitch Evaluator - MVP Spec (Detailed Overview)
 
 This is the implementation contract for MVP behavior, data requirements, and service responsibilities.
 
@@ -16,7 +16,7 @@ Ship a working end-to-end system that:
 - Chainlit intake flow with clarifier interactions.
 - File upload and metadata persistence.
 - Checklist-style onboarding and readiness gates.
-- Deterministic v0 scoring and allocation.
+- Deterministic strategy-scorer-based scoring and allocation.
 - Parallel evaluator outputs with unified envelope.
 - Reviewer approve/reject action with persisted result.
 
@@ -33,11 +33,12 @@ Evaluation is blocked until all mandatory items are provided.
 1. **Thesis**: concise statement of what is mispriced and why.
 2. **Time horizon**: one of `days`, `weeks`, `months`, `years`.
 3. **Stock tickers**: one or more symbols (e.g., `AAPL`, `MSFT`).
-4. **Methodology summary**: data used, signal idea, and validation approach.
-5. **Source URLs**: source URL(s) for submitted data (provenance requirement).
+4. **Source URLs**: required only for uploaded supporting CSV/TSV datasets (provenance requirement).
+5. **Supporting notes** (optional): any additional assumptions/context for validators.
 
 Notes:
 - Supporting file uploads are optional but recommended.
+- Price CSV uploads are never mandatory for `.py`/`.ipynb` strategy backtests; market prices are fetched internally via Alpaca.
 - If data is missing or unclear, clarifier asks follow-ups before evaluation.
 
 ## 4) State Machine
@@ -67,7 +68,7 @@ Rules:
   "time_horizon": "days|weeks|months|years",
   "tickers": ["AAPL", "MSFT"],
   "source_urls": ["https://..."],
-  "methodology_summary": "string",
+  "supporting_notes": "string",
   "uploaded_files": [
     {
       "file_id": "fil_...",
@@ -129,9 +130,9 @@ Inputs:
 - Pitch `tickers` and `thesis` as context.
 
 Outputs:
-- `strategy_data` — main price/signal data files for the pitched strategy.
-- `benchmark` — reference market/index/macro data.
-- `other` — unclassified.
+- `strategy_data` â€” main price/signal data files for the pitched strategy.
+- `benchmark` â€” reference market/index/macro data.
+- `other` â€” unclassified.
 
 Runtime contract:
 - If only one CSV/TSV is uploaded, it is always `strategy_data` (no LLM call).
@@ -157,6 +158,7 @@ Runtime contract (CUA mode):
 - Post-download file matching is reviewed by an LLM against the reference file profile.
 - If mismatch is detected, CUA is re-run with explicit retry guidance until match or retry limit is reached.
 - During full pitch evaluation, CUA validation is mandatory for every uploaded CSV/TSV data file before scoring.
+- All per-file CUA containers are launched **simultaneously** via `asyncio.gather`; each container is isolated with no fixed host port binding, so multiple containers can run without port conflicts.
 - If any required data file lacks a clean CUA validation result, evaluation is routed to clarification (anti-scam gate).
 
 Critical examples:
@@ -196,6 +198,9 @@ Checks:
 - leakage/overfit risk signs,
 - evidence of robust validation framing.
 
+Runtime contract:
+- For pitches that include `.py`/`.ipynb` strategy files, Pipeline Auditor and Data Validator run concurrently (mandatory parallel execution).
+
 Question generation:
 - When `verdict=errors_found`, the LLM populates `artifacts.questions` with 1-4 specific, actionable
   questions pointing at each detected issue (e.g. rolling window anchoring, transaction cost assumptions).
@@ -214,28 +219,32 @@ Computes:
 Triggered automatically during `/evaluate` (and manually via `/backtest`) when the user uploads a `.py` or `.ipynb` strategy file.
 
 **File role detection** (LLM-powered, auto-classifies all uploaded files):
-- `.py`/`.ipynb` → strategy scripts (no LLM needed)
-- Single CSV/TSV → always `strategy_data` (no LLM needed)
-- Multiple CSV/TSVs → Gemini reads column headers + 5 sample rows for each file and classifies
+- `.py`/`.ipynb` â†’ strategy scripts (no LLM needed)
+- Single CSV/TSV â†’ always `strategy_data` (no LLM needed)
+- Multiple CSV/TSVs â†’ Gemini reads column headers + 5 sample rows for each file and classifies
   using pitch `tickers` and `thesis` as context, producing `strategy_data` or `benchmark`.
 - Heuristic keyword fallback is used when no Gemini API key is available.
 
 **3-attempt loop per run:**
-- **Phase 1 – CREATE/FIX**: Claude (`ANTHROPIC_MODEL`) generates a self-contained Python runner that loads the user's strategy, runs it, fetches benchmark data via Alpaca REST bars with dynamic request params (including timeframe/feed/adjustment inferred from strategy/data), computes all required metrics, and prints a JSON object to stdout.
-- **Phase 2 – RUN**: `subprocess.run` executes the generated script in an isolated temp directory (timeout: `BACKTEST_TIMEOUT_SECONDS`, default 120s).
-- **Phase 3 – REVIEW**: Claude validates the JSON output and decides the termination verdict.
+- **Phase 1 â€“ CREATE/FIX**: Claude (`ANTHROPIC_MODEL`) generates a self-contained Python runner that loads the user's strategy, runs it, fetches strategy/benchmark prices via Alpaca REST bars when needed (including notebooks that originally used other data APIs), computes all required metrics, and prints a JSON object to stdout.
+- **Phase 2 â€" RUN**: `subprocess.run` executes the generated script in an isolated temp directory (timeout: `BACKTEST_TIMEOUT_SECONDS`, default 1200s). The generated runner may `pip install` any packages required by the strategy.
+- **Phase 3 â€“ REVIEW**: Claude validates the JSON output and decides the termination verdict.
 
 **Termination statuses:**
-- `success` — all required fields present and valid; `strategy_scorer` composite is used for scoring.
-- `agent_fault` — 3 attempts exhausted with self-introduced bugs; falls back to CSV scoring with a `medium` flag.
-- `user_action_required` — Claude determines the user's script is broken or missing inputs; emits a `high` flag and user-facing message.
+- `success` â€” all required fields present and valid; `strategy_scorer` composite is used for scoring.
+- `agent_fault` â€” 3 attempts exhausted with self-introduced bugs; evaluation fails and requires rerun after fix.
+- `user_action_required` â€” Claude determines the user's script is broken or missing inputs; emits a `high` flag and user-facing message.
+
+Price-data policy:
+- Do not require users to upload price CSV files for `.py`/`.ipynb` strategy backtests.
+- Use Alpaca-fetched bars as the default market data source when local price files are absent.
 
 **Scoring override (when `success`):**
 ```
-overall_score = 0.65 × strategy_scorer_composite
-              + 15 × data_quality_score
-              + 10 × methodology_score
-              + 10 × match_rate
+overall_score = 0.65 Ã— strategy_scorer_composite
+              + 15 Ã— data_quality_score
+              + 10 Ã— methodology_score
+              + 10 Ã— match_rate
 ```
 
 `agent_outputs["scoring"]["artifacts"]["source"]` is set to `"strategy_scorer"` (or `"one_shot"` in one-shot mode) for auditability.
@@ -252,15 +261,15 @@ Triggered only when the user explicitly enables one-shot mode via `/oneshot on`.
 Purpose:
 - Validate event-driven single-trade theses where repeated-trade metrics (Sharpe/win-rate) are not the primary evidence.
 
-#### Phase 0 — LLM Extraction Agent
+#### Phase 0 â€” LLM Extraction Agent
 
-Before any statistical node runs, `_extract_one_shot_params(draft)` is called. It sends the thesis, methodology summary, ticker list, and a profile of each uploaded CSV (column names + 5 sample rows) to Gemini. The model returns a JSON payload with:
+Before any statistical node runs, `_extract_one_shot_params(draft)` is called. It sends the thesis, supporting notes, ticker list, and a profile of each uploaded CSV (column names + 5 sample rows) to Gemini. The model returns a JSON payload with:
 - `event_type`: inferred variant (`causal_chain`, `binary_event`, or `deal_spread`)
 - `event_type_reasoning`: short explanation
-- `column_mappings`: semantic role → `{"file": ..., "column": ...}` for each CSV column role
-- `numeric_params`: free-form text → extracted key/value pairs
+- `column_mappings`: semantic role â†’ `{"file": ..., "column": ...}` for each CSV column role
+- `numeric_params`: free-form text â†’ extracted key/value pairs
 - `extraction_questions`: clarification questions if confidence is low
-- `extraction_confidence`: 0–1 float
+- `extraction_confidence`: 0â€“1 float
 
 If `GEMINI_API_KEY` is absent or the call fails, `extraction_available=False` and all nodes fall back to legacy column-name heuristics and regex parsing.
 
@@ -283,7 +292,7 @@ Each statistical node calls `_find_pair_with_fallback(tables, llm_mapping_left, 
 #### Numeric parameter resolution
 
 `_resolve_numeric(extraction, key, method_text)` resolves numeric params:
-1. Use `extraction.numeric_params[key]` if extraction is available and confidence ≥ 0.6.
+1. Use `extraction.numeric_params[key]` if extraction is available and confidence â‰¥ 0.6.
 2. Fall back to `_parse_numeric_from_text(method_text, key)` (regex `key=value`).
 
 Users may write values conversationally (e.g. "I think there's a 65% chance"); the extraction agent handles parsing.
@@ -295,20 +304,21 @@ Users may write values conversationally (e.g. "I think there's a 65% chance"); t
 - Missing node inputs produce plain-English clarification questions and widened Monte Carlo uncertainty
 - Clarification questions from Phase 0 are surfaced alongside per-node questions
 
-## 9) Scoring & Allocation Policy (v0)
+## 9) Scoring & Allocation Policy
 
-### 9.1 Composite score (0-100)
+### 9.1 Composite score (0-100, non-one-shot)
 
 ```text
-score = 100 * (
-  0.30 * sharpe_n +
-  0.20 * drawdown_n +
-  0.15 * risk_n +
-  0.15 * data_quality_score +
-  0.10 * methodology_score +
-  0.10 * match_rate
-)
+overall_score = 0.65 * strategy_scorer_composite
+              + 15   * data_quality_score
+              + 10   * methodology_score
+              + 10   * match_rate
 ```
+
+Runtime rules:
+- `strategy_scorer` output from backtest is mandatory for `.py`/`.ipynb` strategy pitches.
+- CSV approximation scoring is disabled.
+- If strategy-scorer output is unavailable, evaluation routes to failure/clarification rather than fallback scoring.
 
 ### 9.2 Hard reject rules
 Allocation is forced to `0` when any critical condition occurs, including:
@@ -401,3 +411,4 @@ MVP is complete when:
 2. Keep scoring deterministic and debuggable.
 3. Keep all outputs auditable and recoverable from storage.
 4. Add advanced fetch/validation intelligence after core reliability is stable.
+

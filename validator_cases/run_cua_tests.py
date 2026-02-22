@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -74,7 +74,7 @@ def _build_fred_canada_gdp_case(reference_file: Path) -> tuple[PitchDraft, str, 
         time_horizon="years",
         tickers=["CAD"],
         source_urls=["https://fred.stlouisfed.org/series/NGDPRXDCCAA"],
-        methodology_summary=(
+        supporting_notes=(
             "Use Computer Use Agent to open the FRED series page for Canada Real GDP, "
             "click the CSV download button, and compare the downloaded file against the "
             "submitted reference CSV."
@@ -207,3 +207,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

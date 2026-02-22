@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import math
@@ -137,7 +137,7 @@ Your sole job: extract structured inputs needed for statistical validation of a 
 event-driven strategy from the user's free-form thesis, methodology description, and the
 actual column names and sample rows of every uploaded CSV/TSV file.
 
-## 1. Event type — infer from content, never require a magic keyword
+## 1. Event type â€” infer from content, never require a magic keyword
 
 Choose ONE of:
 - "causal_chain": a causal mechanism connects a driver variable to an asset return
@@ -146,10 +146,10 @@ Choose ONE of:
 - "binary_event": a discrete catalyst (earnings surprise, FDA decision, regulatory ruling,
   product launch) where the user models a probability vs. market-implied probability.
   Needs Nodes 2, 4.
-- "deal_spread": merger/acquisition arbitrage — user models deal close probability vs.
+- "deal_spread": merger/acquisition arbitrage â€” user models deal close probability vs.
   market-implied break-even price. Needs Node 2 and deal pricing inputs.
 
-## 2. Column mapping — use actual file content
+## 2. Column mapping â€” use actual file content
 
 Map uploaded CSV/TSV columns to semantic roles. Use both column names AND sample values:
 - "driver":        independent/causal variable that precedes the return (crop yield,
@@ -157,15 +157,15 @@ Map uploaded CSV/TSV columns to semantic roles. Use both column names AND sample
 - "asset_return":  realized returns or price changes of the target asset
 - "severity":      magnitude/intensity of historical driver episodes (for Node 3 OLS)
 - "magnitude":     price change corresponding to each historical episode (for Node 3 OLS)
-- "forecast_prob": probability forecasts — values should be in [0, 1]
-- "outcome":       binary realized outcome — values should be 0 or 1
+- "forecast_prob": probability forecasts â€” values should be in [0, 1]
+- "outcome":       binary realized outcome â€” values should be 0 or 1
 
 Return null for a role that is not needed for the inferred event type, or that is absent
-from all files. Return null rather than guessing — false positives cause wrong statistics.
+from all files. Return null rather than guessing â€” false positives cause wrong statistics.
 
-## 3. Numeric parameter extraction — handle free-form text
+## 3. Numeric parameter extraction â€” handle free-form text
 
-Extract from methodology_summary using semantic understanding, not just regex:
+Extract from supporting_notes using semantic understanding, not just regex:
 - "I believe there is a 65% chance" -> p_true = 0.65
 - "market implies around 50%" -> p_market = 0.50
 - "upside ~120%" or "payoff if correct is 1.2x" -> payoff_up = 1.2
@@ -175,14 +175,14 @@ Extract from methodology_summary using semantic understanding, not just regex:
 
 Set a param to null if you cannot determine it with reasonable confidence.
 
-## 4. Questions — specific, actionable, plain English
+## 4. Questions â€” specific, actionable, plain English
 
 For each role or param you cannot determine, produce one focused question.
 - Bad:  "Please provide probability inputs."
 - Good: "What probability do you assign to the event occurring, and what does the market
   currently imply? (e.g. 'I think there is a 65% chance, market implies around 50%')"
 
-## Output — strict JSON only
+## Output â€” strict JSON only
 
 {
   "event_type": "causal_chain|binary_event|deal_spread",
@@ -285,7 +285,7 @@ def _extract_one_shot_params(draft: Any) -> OneShotExtractionResult:
         "thesis": getattr(draft, "thesis", "") or "",
         "tickers": getattr(draft, "tickers", []) or [],
         "source_urls": getattr(draft, "source_urls", []) or [],
-        "methodology_summary": getattr(draft, "methodology_summary", "") or "",
+        "supporting_notes": getattr(draft, "supporting_notes", "") or "",
         "files": file_profiles,
     }
 
@@ -412,7 +412,7 @@ def _run_node2_forecast_calibration(
             "Please upload a forecast calibration history CSV with at least 20 rows. "
             "The file should have one column of probability estimates (values between 0 and 1) "
             "and one column of binary realized outcomes (0 or 1). "
-            "Column names can be anything — the system will identify them automatically."
+            "Column names can be anything â€” the system will identify them automatically."
         )
         flags.append({
             "code": "ONE_SHOT_NODE2_INPUT_MISSING",
@@ -463,7 +463,7 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
     fallback_inputs_used: list[str] = []
     criteria: list[dict[str, Any]] = []
 
-    # ── Phase 0: LLM Extraction ──────────────────────────────────────────────
+    # â”€â”€ Phase 0: LLM Extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Gemini reads thesis, methodology, tickers, and actual CSV column profiles to
     # infer event type, map columns to semantic roles, and extract numeric params
     # from free-form text. Raises RuntimeError if GEMINI_API_KEY is not set.
@@ -493,12 +493,12 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
     beta_std = 0.15
     node1_n = 0
 
-    # ── Node 2: Forecast Calibration ─────────────────────────────────────────
+    # â”€â”€ Node 2: Forecast Calibration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     node2 = _run_node2_forecast_calibration(tables, extraction, flags, questions, missing_inputs)
     criteria.append(node2)
 
     if variant == "causal_chain":
-        # ── Node 1: Causal Relationship ──────────────────────────────────────
+        # â”€â”€ Node 1: Causal Relationship â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         x, y = _find_pair_with_fallback(
             tables,
             col_maps.get("driver"),
@@ -510,7 +510,7 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             questions.append(
                 "Please upload a CSV with at least 30 rows containing your causal driver series "
                 "and the target asset return series side-by-side. "
-                "Column names can be anything — the system will identify them automatically."
+                "Column names can be anything â€” the system will identify them automatically."
             )
             flags.append({
                 "code": "ONE_SHOT_NODE1_INPUT_MISSING",
@@ -547,7 +547,7 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
                 })
         criteria.append(node1)
 
-        # ── Node 3: Magnitude Estimate ────────────────────────────────────────
+        # â”€â”€ Node 3: Magnitude Estimate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         severity, change = _find_pair_with_fallback(
             tables,
             col_maps.get("severity"),
@@ -559,7 +559,7 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             questions.append(
                 "Please upload a CSV with at least 8 historical episodes showing the intensity "
                 "of the driver event alongside the resulting price change. "
-                "Column names can be anything — the system will identify them automatically."
+                "Column names can be anything â€” the system will identify them automatically."
             )
             flags.append({
                 "code": "ONE_SHOT_NODE3_INPUT_MISSING",
@@ -602,7 +602,7 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
                 })
         criteria.append(node3)
 
-    # ── Node 4: Market Mispricing ────────────────────────────────────────────
+    # â”€â”€ Node 4: Market Mispricing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     p_true = _resolve_numeric(extraction, "p_true")
     p_market = _resolve_numeric(extraction, "p_market")
     payoff_up = _resolve_numeric(extraction, "payoff_up")
@@ -623,7 +623,7 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
             questions.append(
                 "For a deal-spread strategy, please provide: your probability of the deal "
                 "closing, the current market price, the expected price if it closes, and the "
-                "expected price if it breaks. You can write these conversationally — for example: "
+                "expected price if it breaks. You can write these conversationally â€” for example: "
                 "'I think there is a 75% chance the deal closes. Stock is at $45, acquisition "
                 "price is $55, break price is around $35.'"
             )
@@ -840,3 +840,4 @@ def evaluate_one_shot_strategy(*, draft: Any, min_positive_edge_prob: float = 0.
         missing_inputs=missing_inputs,
         validation_questions=questions,
     )
+

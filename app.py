@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -27,6 +29,7 @@ from pitch_engine import (
     validate_data_with_cua,
 )
 from pitch_db import append_pitch_message, save_pitch_result, upsert_pitch_snapshot
+from paid_usage import PaidUsageTracker
 
 try:
     from backtest_agent import run_backtest_agent as _run_backtest_agent
@@ -38,6 +41,10 @@ load_dotenv()
 
 import os as _os
 BACKTEST_TIMEOUT_SECONDS = int(_os.getenv("BACKTEST_TIMEOUT_SECONDS", "120"))
+_DEFAULT_PAID_EXTERNAL_PRODUCT_ID = "quant_pitch_evaluator"
+_PAID_TRACKER = PaidUsageTracker.from_env(default_event_name="eva_by_anyquant")
+if _PAID_TRACKER.external_product_id is None:
+    _PAID_TRACKER.external_product_id = _DEFAULT_PAID_EXTERNAL_PRODUCT_ID
 
 DATA_ROOT = Path("data/pitches")
 
@@ -48,8 +55,8 @@ You are interviewer-led: you control the flow and actively test the pitch for we
 Your goals:
 1) Help the user produce a clear investment thesis.
 2) Confirm target stock tickers and time horizon.
-3) Request source URLs when missing.
-4) Remind the user to upload their strategy files (.py or .ipynb) and/or price data (.csv) if not yet attached.
+3) Request source URLs only when the user uploads supporting data files.
+4) Remind the user to upload their strategy files (.py or .ipynb) if not yet attached.
 5) Keep and show a practical checklist of required submissions:
    - thesis
    - time_horizon (days|weeks|months|years)
@@ -65,12 +72,17 @@ At the end of every response, include these XML blocks with strict JSON:
 <pitch_state>{"thesis": "...", "time_horizon": "days|weeks|months|years|null", "tickers": [], "source_urls": [], "one_shot_mode": false, "ready_for_evaluation": false}</pitch_state>
 <orchestrator_actions>{"actions":[{"action":"run_evaluate|run_backtest|run_validate_data","file_name":"optional","notes":"optional","reason":"short reason"}]}</orchestrator_actions>
 
+When you need file context before replying, request tools with:
+<file_tools>{"calls":[{"tool":"read_uploaded_file|read_notebook_cells","file_name":"...","start_line":1,"max_lines":200,"start_cell":0,"cell_count":3,"max_chars":12000}]}</file_tools>
+After tool results are returned, continue the conversation and then output `<pitch_state>` and `<orchestrator_actions>`.
+
 Rules:
 - If you are uncertain about a field, return the current best value or empty string.
 - `tickers` must always be a JSON array of stock tickers (e.g., ["AAPL", "MSFT"]).
 - `source_urls` must always be a JSON array.
 - Keep conversational text before the XML block.
 - Include exactly one `<pitch_state>` block and exactly one `<orchestrator_actions>` block.
+- If you emit `<file_tools>`, do not emit `<pitch_state>` or `<orchestrator_actions>` in that same response.
 - If no action is needed, return: `<orchestrator_actions>{"actions":[]}</orchestrator_actions>`.
 - You may emit multiple actions in one turn when it improves workflow; order them as they should run.
 - Evaluate-only flow: do not reference or request `/validate`.
@@ -97,6 +109,13 @@ Optional commands:
 - `/reset` start a new pitch
 - `/help` show commands
 """.strip()
+
+MAX_CLARIFIER_TOOL_ROUNDS = 4
+MAX_TOOL_CALLS_PER_ROUND = 4
+MAX_TOOL_CHARS = 12000
+MAX_TOOL_LINES = 300
+MAX_TOOL_CELLS = 8
+_LOGGER = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -199,6 +218,63 @@ def _set_session_data_fetcher_output(output: dict[str, Any] | None) -> None:
     cl.user_session.set("data_fetcher_output", output)
 
 
+def _non_empty_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _session_external_customer_id() -> str | None:
+    env_override = _non_empty_str(_os.getenv("PAID_EXTERNAL_CUSTOMER_ID", ""))
+    if env_override:
+        return env_override
+
+    for key in ("external_customer_id", "customer_id", "user_id", "id"):
+        candidate = _non_empty_str(cl.user_session.get(key))
+        if candidate:
+            return candidate
+
+    user_obj = cl.user_session.get("user")
+    if isinstance(user_obj, dict):
+        for key in ("identifier", "id", "email", "name"):
+            candidate = _non_empty_str(user_obj.get(key))
+            if candidate:
+                return candidate
+    elif user_obj is not None:
+        for attr in ("identifier", "id", "email", "name"):
+            candidate = _non_empty_str(getattr(user_obj, attr, None))
+            if candidate:
+                return candidate
+
+    return None
+
+
+def _track_paid_usage(draft: PitchDraft | None, usage_action: str, **data: Any) -> None:
+    if not _PAID_TRACKER.enabled:
+        return
+
+    payload: dict[str, Any] = {"usage_action": usage_action}
+    payload.update(data)
+    if draft is not None:
+        payload.setdefault("pitch_id", draft.pitch_id)
+        payload.setdefault("pitch_status", draft.status)
+        payload.setdefault("one_shot_mode", bool(draft.one_shot_mode))
+
+    external_customer_id = _session_external_customer_id() or (draft.pitch_id if draft else None)
+
+    async def _emit() -> None:
+        try:
+            await _PAID_TRACKER.send_usage_record_async(
+                external_customer_id=external_customer_id,
+                data=payload,
+            )
+        except Exception as exc:
+            _LOGGER.warning("Paid usage task failed: %s: %s", exc.__class__.__name__, exc)
+
+    asyncio.create_task(_emit())
+
+
 def _apply_clarification_update(draft: PitchDraft, user_text: str) -> None:
     if draft.status != "needs_clarification":
         return
@@ -206,10 +282,10 @@ def _apply_clarification_update(draft: PitchDraft, user_text: str) -> None:
     if not text:
         return
     # Preserve concise clarification evidence for validator reruns.
-    if draft.methodology_summary:
-        draft.methodology_summary = f"{draft.methodology_summary}\n\nClarification:\n{text}"
+    if draft.supporting_notes:
+        draft.supporting_notes = f"{draft.supporting_notes}\n\nClarification:\n{text}"
     else:
-        draft.methodology_summary = text
+        draft.supporting_notes = text
 
 
 def _status_markdown(draft: PitchDraft) -> str:
@@ -226,29 +302,37 @@ def _status_markdown(draft: PitchDraft) -> str:
         f"- One-shot mode: `{draft.one_shot_mode}`\n"
         f"- Time horizon: `{draft.time_horizon or '(missing)'}`\n"
         f"- Tickers: {tickers}\n"
-        f"- Source URLs (required): {urls}\n"
+        f"- Source URLs: {urls}\n"
         f"- Uploaded files: {files}\n"
         f"- Missing fields: `{', '.join(missing) if missing else 'none'}`"
     )
 
 
 def _checklist_markdown(draft: PitchDraft) -> str:
+    has_tabular_data = any(Path(file.path).suffix.lower() in {".csv", ".tsv"} for file in draft.uploaded_files)
+    has_strategy_script = any(Path(file.path).suffix.lower() in {".py", ".ipynb"} for file in draft.uploaded_files)
     checks = [
         ("Strategy mode explicitly set (`/oneshot on` for one-shot, otherwise standard)", True),
         ("Thesis (1-3 sentences)", bool(draft.thesis.strip())),
         ("Time horizon (`days`, `weeks`, `months`, `years`)", bool(draft.time_horizon)),
         ("Stock tickers (e.g., `AAPL, MSFT`)", len(draft.tickers) > 0),
-        ("Source URL(s) for submitted data", len(draft.source_urls) > 0),
-        ("Strategy files (`.py`/`.ipynb` script or `.csv` data)", len(draft.uploaded_files) > 0),
+        (
+            "Source URL(s) for uploaded supporting data files (CSV/TSV)",
+            (not has_tabular_data) or len(draft.source_urls) > 0,
+        ),
+        (
+            "Strategy file uploaded (`.py`/`.ipynb`)",
+            has_strategy_script if not draft.one_shot_mode else len(draft.uploaded_files) > 0,
+        ),
     ]
     lines = ["## Onboarding Checklist"]
     for label, done in checks:
-        lines.append(f"- {'✅' if done else '⬜'} {label}")
+        lines.append(f"- {chr(0x2705) if done else chr(0x2B1C)} {label}")
     missing = draft.missing_fields()
     lines.append("")
     lines.append(f"- Ready: `{draft.ready_for_evaluation()}`")
     lines.append(f"- Missing: `{', '.join(missing) if missing else 'none'}`")
-    lines.append("- Upload your strategy `.py` or `.ipynb` file and/or price data `.csv` using the attachment button.")
+    lines.append("- Upload your strategy `.py` or `.ipynb` file using the attachment button.")
     return "\n".join(lines)
 
 
@@ -257,15 +341,187 @@ def _local_clarifier_reply(draft: PitchDraft) -> str:
     if not missing:
         return "Your pitch looks complete. I will automatically run validation now."
 
+    upload_prompt = (
+        "Upload your strategy file (`.py` or `.ipynb`) using the attachment button below."
+        if not draft.one_shot_mode
+        else "Upload your supporting one-shot data/evidence file(s) (`.csv`, `.tsv`, `.py`, or `.ipynb`) using the attachment button below."
+    )
     prompt_map = {
         "thesis": "State the thesis in one sentence: what is mispriced and why now?",
         "time_horizon": "Pick a horizon: days, weeks, months, or years.",
         "tickers": "Share the stock ticker(s), for example: AAPL or AAPL, MSFT.",
-        "source_urls": "Share source URL(s) for every submitted dataset so we can verify provenance.",
-        "uploaded_files": "Upload your strategy file (`.py` or `.ipynb`) and/or price data (`.csv`) using the attachment button below.",
+        "source_urls": "Share source URL(s) for any uploaded supporting data file so we can verify provenance.",
+        "uploaded_files": upload_prompt,
     }
     first_missing = missing[0]
     return f"I captured your latest details. Next: {prompt_map.get(first_missing, first_missing)}"
+
+
+def _resolve_uploaded_file(draft: PitchDraft, file_name: str) -> UploadedFile | None:
+    target = file_name.strip()
+    if not target:
+        return None
+    for item in draft.uploaded_files:
+        if item.name == target:
+            return item
+    lowered = target.lower()
+    for item in draft.uploaded_files:
+        if item.name.lower() == lowered:
+            return item
+    return None
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n... [truncated]"
+
+
+def _read_uploaded_file_lines(
+    draft: PitchDraft,
+    file_name: str,
+    start_line: int = 1,
+    max_lines: int = 200,
+    max_chars: int = MAX_TOOL_CHARS,
+) -> dict[str, Any]:
+    uploaded = _resolve_uploaded_file(draft, file_name)
+    if uploaded is None:
+        return {"ok": False, "error": f"Uploaded file not found: {file_name}"}
+
+    path = Path(uploaded.path)
+    if not path.exists():
+        return {"ok": False, "error": f"Stored file missing on disk: {uploaded.name}"}
+
+    suffix = path.suffix.lower()
+    if suffix not in {".py", ".md", ".txt", ".csv", ".tsv", ".json", ".yaml", ".yml", ".ipynb"}:
+        return {"ok": False, "error": f"Unsupported text file type for read_uploaded_file: {suffix or '(none)'}"}
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    line_count = len(lines)
+    safe_start = max(1, int(start_line or 1))
+    safe_max_lines = max(1, min(int(max_lines or 200), MAX_TOOL_LINES))
+    safe_max_chars = max(500, min(int(max_chars or MAX_TOOL_CHARS), MAX_TOOL_CHARS))
+
+    start_idx = min(safe_start - 1, line_count)
+    end_idx = min(start_idx + safe_max_lines, line_count)
+    numbered = [f"{idx + 1}|{lines[idx]}" for idx in range(start_idx, end_idx)]
+    snippet = _truncate_text("\n".join(numbered), safe_max_chars)
+
+    return {
+        "ok": True,
+        "file_name": uploaded.name,
+        "line_start": safe_start,
+        "line_end": end_idx,
+        "total_lines": line_count,
+        "content": snippet,
+    }
+
+
+def _read_uploaded_notebook_cells(
+    draft: PitchDraft,
+    file_name: str,
+    start_cell: int = 0,
+    cell_count: int = 3,
+    max_chars: int = MAX_TOOL_CHARS,
+) -> dict[str, Any]:
+    uploaded = _resolve_uploaded_file(draft, file_name)
+    if uploaded is None:
+        return {"ok": False, "error": f"Uploaded file not found: {file_name}"}
+
+    path = Path(uploaded.path)
+    if path.suffix.lower() != ".ipynb":
+        return {"ok": False, "error": f"File is not a notebook: {uploaded.name}"}
+    if not path.exists():
+        return {"ok": False, "error": f"Stored file missing on disk: {uploaded.name}"}
+
+    try:
+        notebook = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"Could not parse notebook JSON: {exc}"}
+
+    cells = notebook.get("cells", [])
+    if not isinstance(cells, list):
+        return {"ok": False, "error": "Notebook has no readable cells array."}
+
+    safe_start = max(0, int(start_cell or 0))
+    safe_count = max(1, min(int(cell_count or 3), MAX_TOOL_CELLS))
+    safe_max_chars = max(500, min(int(max_chars or MAX_TOOL_CHARS), MAX_TOOL_CHARS))
+
+    selected = cells[safe_start:safe_start + safe_count]
+    rendered: list[str] = []
+    for idx, cell in enumerate(selected, start=safe_start):
+        cell_type = str(cell.get("cell_type", "unknown"))
+        source = cell.get("source", "")
+        if isinstance(source, list):
+            source_text = "".join(str(part) for part in source)
+        else:
+            source_text = str(source)
+        rendered.append(f"Cell {idx} ({cell_type}):\n{source_text}")
+
+    return {
+        "ok": True,
+        "file_name": uploaded.name,
+        "cell_start": safe_start,
+        "cell_end_exclusive": safe_start + len(selected),
+        "total_cells": len(cells),
+        "content": _truncate_text("\n\n".join(rendered), safe_max_chars),
+    }
+
+
+def _execute_clarifier_file_tools(draft: PitchDraft, raw_text: str) -> tuple[list[dict[str, Any]], bool]:
+    request = extract_tagged_json(raw_text, "file_tools")
+    if not isinstance(request, dict):
+        return [], False
+
+    calls = request.get("calls")
+    if not isinstance(calls, list):
+        return [{"ok": False, "error": "file_tools.calls must be a JSON array."}], True
+
+    results: list[dict[str, Any]] = []
+    for call in calls[:MAX_TOOL_CALLS_PER_ROUND]:
+        if not isinstance(call, dict):
+            results.append({"ok": False, "error": "Tool call entry must be a JSON object."})
+            continue
+        tool = str(call.get("tool", "")).strip()
+        file_name = str(call.get("file_name", "")).strip()
+        if not file_name:
+            results.append({"ok": False, "tool": tool, "error": "file_name is required."})
+            continue
+
+        if tool == "read_uploaded_file":
+            results.append(
+                _read_uploaded_file_lines(
+                    draft=draft,
+                    file_name=file_name,
+                    start_line=int(call.get("start_line", 1) or 1),
+                    max_lines=int(call.get("max_lines", 200) or 200),
+                    max_chars=int(call.get("max_chars", MAX_TOOL_CHARS) or MAX_TOOL_CHARS),
+                )
+            )
+            continue
+
+        if tool == "read_notebook_cells":
+            results.append(
+                _read_uploaded_notebook_cells(
+                    draft=draft,
+                    file_name=file_name,
+                    start_cell=int(call.get("start_cell", 0) or 0),
+                    cell_count=int(call.get("cell_count", 3) or 3),
+                    max_chars=int(call.get("max_chars", MAX_TOOL_CHARS) or MAX_TOOL_CHARS),
+                )
+            )
+            continue
+
+        results.append(
+            {
+                "ok": False,
+                "tool": tool,
+                "error": "Unsupported tool. Use read_uploaded_file or read_notebook_cells.",
+            }
+        )
+
+    return results, True
 
 
 def _extract_orchestrator_actions(raw_text: str) -> list[dict[str, str]]:
@@ -316,18 +572,70 @@ async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> tuple[str, l
         f"RECENT_TURNS=\n{history_text}"
     )
 
+    raw_text = ""
+    tool_context: list[dict[str, Any]] = []
     async with cl.Step(name="Clarifier Agent", type="llm") as step:
         step.input = f"Analyzing user input and extracting pitch fields..."
-        response = await cl.make_async(client.models.generate_content)(
-            model=_gemini_model(),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=10000,
-                system_instruction=SYSTEM_PROMPT,
-            ),
-        )
-        raw_text = (getattr(response, "text", "") or "").strip()
+        for round_num in range(MAX_CLARIFIER_TOOL_ROUNDS):
+            prompt_with_tools = prompt
+            if tool_context:
+                tool_payload = json.dumps(tool_context, ensure_ascii=True)
+                prompt_with_tools = f"{prompt}\n\nTOOL_RESULTS={tool_payload}"
+
+            response = await cl.make_async(client.models.generate_content)(
+                model=_gemini_model(),
+                contents=prompt_with_tools,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=10000,
+                    system_instruction=SYSTEM_PROMPT,
+                ),
+            )
+            raw_text = (getattr(response, "text", "") or "").strip()
+
+            # Extract the tool request payload BEFORE executing, for display
+            file_tools_request = extract_tagged_json(raw_text, "file_tools")
+
+            tool_results, has_tool_request = _execute_clarifier_file_tools(draft, raw_text)
+            if not has_tool_request:
+                break
+
+            # Render each tool call as a nested expandable step
+            if isinstance(file_tools_request, dict):
+                calls = file_tools_request.get("calls", []) or []
+                for call_idx, call in enumerate(calls[:MAX_TOOL_CALLS_PER_ROUND]):
+                    if not isinstance(call, dict):
+                        continue
+                    tool_name = call.get("tool", "tool")
+                    file_name = call.get("file_name", "?")
+                    result_data: dict[str, Any] = tool_results[call_idx] if call_idx < len(tool_results) else {}
+
+                    # Input: show params minus the tool name itself
+                    input_params = {k: v for k, v in call.items() if k != "tool"}
+                    input_summary = json.dumps(input_params, indent=2)
+
+                    # Output: readable summary
+                    if result_data.get("ok"):
+                        content_preview = str(result_data.get("content", ""))[:600]
+                        line_start = result_data.get("line_start") or result_data.get("cell_start", "?")
+                        line_end = result_data.get("line_end") or result_data.get("cell_end_exclusive", "?")
+                        total = result_data.get("total_lines") or result_data.get("total_cells", "?")
+                        output_summary = (
+                            f"**Read** `{file_name}` — rows {line_start}–{line_end} of {total}\n\n"
+                            f"```\n{content_preview}\n```"
+                        )
+                    else:
+                        output_summary = f"**Error:** {result_data.get('error', 'unknown error')}"
+
+                    async with cl.Step(
+                        name=f"{tool_name}({file_name})",
+                        type="tool",
+                    ) as tool_step:
+                        tool_step.input = input_summary
+                        tool_step.output = output_summary
+
+            tool_context.append({"request_results": tool_results})
+
         extracted = extract_tagged_json(raw_text, "pitch_state")
         if extracted:
             draft.merge_structured_update(extracted)
@@ -336,7 +644,8 @@ async def _run_clarifier_turn(draft: PitchDraft, user_text: str) -> tuple[str, l
             step.output = "No structured fields extracted this turn."
 
     actions = _extract_orchestrator_actions(raw_text)
-    text_wo_state = strip_tagged_json(raw_text, "pitch_state")
+    text_wo_tools = strip_tagged_json(raw_text, "file_tools")
+    text_wo_state = strip_tagged_json(text_wo_tools, "pitch_state")
     assistant_text = strip_tagged_json(text_wo_state, "orchestrator_actions") or _local_clarifier_reply(draft)
     history.append({"role": "assistant", "content": assistant_text})
     _set_session_history(history)
@@ -452,7 +761,7 @@ def _parse_source_fetch_hints(text: str) -> dict[str, Any]:
 
 
 def _build_cua_context_for_file(draft: PitchDraft, file_entry: UploadedFile, reason: str) -> tuple[str, list[str], str]:
-    hints = _parse_source_fetch_hints(draft.methodology_summary or "")
+    hints = _parse_source_fetch_hints(draft.supporting_notes or "")
     file_key = (file_entry.name or "").strip().lower()
     file_note = hints["file_notes"].get(file_key, "")
     file_url = hints["file_urls"].get(file_key, "").strip()
@@ -493,16 +802,11 @@ def _merge_cua_outputs(per_file_outputs: dict[str, dict[str, Any]]) -> dict[str,
     if not per_file_outputs:
         return {
             "agent": "data_fetcher",
-            "status": "fail",
-            "confidence": 0.0,
-            "summary": "No data files were available for mandatory CUA validation.",
-            "flags": [
-                {
-                    "code": "CUA_DATA_FILES_MISSING",
-                    "message": "Upload at least one CSV/TSV data file so CUA can validate source provenance.",
-                }
-            ],
-            "artifacts": {"validated_file_names": [], "match_rate": 0.0, "per_file": {}},
+            "status": "ok",
+            "confidence": 1.0,
+            "summary": "No uploaded CSV/TSV files required CUA validation; price history is fetched internally for backtesting.",
+            "flags": [],
+            "artifacts": {"validated_file_names": [], "match_rate": 1.0, "per_file": {}},
             "latency_ms": 0,
         }
 
@@ -576,42 +880,49 @@ async def _auto_validate_all_data_files_with_cua(draft: PitchDraft, reason: str)
         author="CUA Data Fetcher",
     ).send()
 
+    async def _validate_one(file_entry: UploadedFile) -> tuple[str, dict[str, Any]]:
+        notes, source_urls_override, expected_format = _build_cua_context_for_file(draft, file_entry, reason)
+        try:
+            output = await cl.make_async(validate_data_with_cua)(
+                draft,
+                file_entry.name,
+                notes,
+                source_urls_override,
+            )
+        except Exception as exc:
+            output = {
+                "agent": "data_fetcher",
+                "status": "fail",
+                "confidence": 0.0,
+                "summary": f"CUA execution failed for {file_entry.name}.",
+                "flags": [
+                    {
+                        "code": "CUA_RUNTIME_ERROR",
+                        "message": f"{type(exc).__name__}: {exc}",
+                    }
+                ],
+                "artifacts": {"requested_file": file_entry.name, "match_rate": 0.0},
+                "latency_ms": 0,
+            }
+        artifacts = output.get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+        artifacts["expected_file_format"] = expected_format
+        artifacts["expected_source_urls"] = source_urls_override
+        artifacts["expected_fetch_notes"] = notes
+        output["artifacts"] = artifacts
+        return file_entry.name, output
+
     outputs: dict[str, dict[str, Any]] = {}
     async with cl.Step(name="CUA Data Fetcher", type="tool") as step:
-        step.input = f"Auto-validating {len(files)} file(s) against submitted source URLs."
-        for index, file_entry in enumerate(files, start=1):
-            step.output = f"Validating `{file_entry.name}` ({index}/{len(files)})..."
-            notes, source_urls_override, expected_format = _build_cua_context_for_file(draft, file_entry, reason)
-            try:
-                output = await cl.make_async(validate_data_with_cua)(
-                    draft,
-                    file_entry.name,
-                    notes,
-                    source_urls_override,
-                )
-            except Exception as exc:
-                output = {
-                    "agent": "data_fetcher",
-                    "status": "fail",
-                    "confidence": 0.0,
-                    "summary": f"CUA execution failed for {file_entry.name}.",
-                    "flags": [
-                        {
-                            "code": "CUA_RUNTIME_ERROR",
-                            "message": f"{type(exc).__name__}: {exc}",
-                        }
-                    ],
-                    "artifacts": {"requested_file": file_entry.name, "match_rate": 0.0},
-                    "latency_ms": 0,
-                }
-            artifacts = output.get("artifacts", {})
-            if not isinstance(artifacts, dict):
-                artifacts = {}
-            artifacts["expected_file_format"] = expected_format
-            artifacts["expected_source_urls"] = source_urls_override
-            artifacts["expected_fetch_notes"] = notes
-            output["artifacts"] = artifacts
-            outputs[file_entry.name] = output
+        step.input = (
+            f"Auto-validating {len(files)} file(s) against submitted source URLs "
+            "(running all CUAs simultaneously)."
+        )
+        step.output = f"Running {len(files)} CUA container(s) in parallel..."
+        results = await asyncio.gather(*[_validate_one(f) for f in files])
+        for name, output in results:
+            outputs[name] = output
         step.output = "Completed CUA checks for all required data files."
 
     combined = _merge_cua_outputs(outputs)
@@ -691,7 +1002,7 @@ async def _render_agent_step(agent_key: str, agent_output: dict[str, Any]) -> No
     latency = agent_output.get("latency_ms", 0)
 
     step_output_lines = [
-        f"**Status:** {_status_icon(status)} `{status}`  |  **Confidence:** `{confidence:.0%}`  |  **Latency:** `{latency}ms`",
+        f"{_status_icon(status)} **{status.upper()}**  |  Confidence: `{confidence:.0%}`  |  Latency: `{latency}ms`",
         "",
         f"**Summary:** {summary}",
         "",
@@ -798,6 +1109,7 @@ def _render_score_card(result: Any) -> str:
 
 async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/evaluate") -> None:
     if not draft.ready_for_evaluation():
+        _track_paid_usage(draft, "evaluate_blocked", command=command_name, reason="not_ready")
         await cl.Message(
             content=(
                 "Evaluation is blocked until required items are complete.\n\n"
@@ -806,9 +1118,11 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
         ).send()
         return
 
+    started_at = asyncio.get_running_loop().time()
     draft.status = "running"
     _save_pitch_snapshot(draft)
     _append_chat_event(draft, "system", "Evaluation started.")
+    _track_paid_usage(draft, "evaluate_started", command=command_name)
 
     # --- TaskList: show all pipeline stages ---
     task_list = cl.TaskList()
@@ -843,9 +1157,17 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
             draft, data_fetcher_output=data_fetcher_output
         )
     except Exception as exc:
+        elapsed_seconds = round(asyncio.get_running_loop().time() - started_at, 3)
         draft.status = "failed"
         _save_pitch_snapshot(draft)
         _append_chat_event(draft, "system", f"{command_name} failed. Error={exc.__class__.__name__}")
+        _track_paid_usage(
+            draft,
+            "evaluate_failed",
+            command=command_name,
+            error_type=exc.__class__.__name__,
+            elapsed_seconds=elapsed_seconds,
+        )
         # Mark all tasks failed
         for t in [task_data, task_backtest, task_fabrication, task_auditor, task_one_shot, task_scoring]:
             t.status = cl.TaskStatus.FAILED
@@ -876,6 +1198,15 @@ async def _handle_evaluate_command(draft: PitchDraft, command_name: str = "/eval
     completed_at = _now_iso() if draft.status in {"ready_for_final_review", "rejected"} else None
     save_pitch_result(draft.pitch_id, _now_iso(), completed_at, result_dict)
     _append_chat_event(draft, "system", f"{command_name} complete. Decision={result.decision}")
+    _track_paid_usage(
+        draft,
+        "evaluate_completed",
+        command=command_name,
+        decision=result.decision,
+        validation_outcome=result.validation_outcome,
+        overall_score=result.overall_score,
+        elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+    )
 
     # Mark data loading done
     task_data.status = cl.TaskStatus.DONE
@@ -971,6 +1302,7 @@ def _parse_validate_data_command(content: str) -> tuple[str | None, str | None, 
 async def _handle_backtest_command(draft: PitchDraft) -> None:
     """Run the Claude backtest agent on uploaded strategy .py/.ipynb files."""
     if not _BACKTEST_AVAILABLE:
+        _track_paid_usage(draft, "backtest_unavailable", reason="missing_dependency_or_key")
         await cl.Message(
             content=(
                 "Backtest agent is unavailable. "
@@ -982,10 +1314,11 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
 
     roles = _detect_file_roles(draft.uploaded_files, tickers=draft.tickers, thesis=draft.thesis)
     if not roles["strategy_scripts"]:
+        _track_paid_usage(draft, "backtest_blocked", reason="no_strategy_script")
         await cl.Message(
             content=(
-                "No strategy script found. Upload a `.py` or `.ipynb` file containing your strategy "
-                "and optionally a price data CSV, then run `/backtest` again."
+                "No strategy script found. Upload a `.py` or `.ipynb` file containing your strategy, "
+                "then run `/backtest` again."
             ),
             author="Backtest Agent",
         ).send()
@@ -1001,6 +1334,12 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         try:
             _strat_files.append(_load_strategy_source_for_backtest(_f))
         except Exception as exc:
+            _track_paid_usage(
+                draft,
+                "backtest_prepare_failed",
+                file_name=_f.name,
+                error_type=exc.__class__.__name__,
+            )
             await cl.Message(
                 content=f"Could not prepare strategy file `{_f.name}`: {exc}",
                 author="Backtest Agent",
@@ -1015,6 +1354,12 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         except Exception as exc:
             data_read_errors.append(f"{_f.name}: {type(exc).__name__}: {exc}")
     if data_read_errors:
+        _track_paid_usage(
+            draft,
+            "backtest_prepare_failed",
+            reason="data_file_read_error",
+            error_count=len(data_read_errors),
+        )
         details = "\n".join(f"- {item}" for item in data_read_errors)
         await cl.Message(
             content=(
@@ -1032,6 +1377,14 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         ),
         author="Backtest Agent",
     ).send()
+
+    started_at = asyncio.get_running_loop().time()
+    _track_paid_usage(
+        draft,
+        "backtest_started",
+        script_count=len(roles["strategy_scripts"]),
+        data_file_count=len(roles["data_files"]) + len(roles["benchmark_files"]),
+    )
 
     # Run with nested steps for each phase
     async with cl.Step(name="Backtest Agent", type="run") as parent_step:
@@ -1065,6 +1418,14 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         draft,
         "system",
         f"/backtest status={result.status} attempts={result.attempt_count}",
+    )
+    _track_paid_usage(
+        draft,
+        "backtest_completed",
+        status=result.status,
+        attempts=result.attempt_count,
+        has_metrics=bool(result.metrics),
+        elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
     )
 
     if result.status == "success" and result.metrics:
@@ -1118,6 +1479,7 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
 async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None:
     file_name, notes, error = _parse_validate_data_command(content)
     if error:
+        _track_paid_usage(draft, "validate_data_blocked", reason=error)
         await cl.Message(content=error).send()
         return
 
@@ -1127,6 +1489,15 @@ async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None
         content=f"Validating `{file_name}` against source URLs. This can take a few minutes.",
         author="CUA Data Fetcher",
     ).send()
+
+    started_at = asyncio.get_running_loop().time()
+    _track_paid_usage(
+        draft,
+        "validate_data_started",
+        file_name=file_name,
+        source_url_count=len(draft.source_urls),
+        has_notes=bool(notes),
+    )
 
     async with cl.Step(name="CUA Data Fetcher", type="tool") as step:
         step.input = f"File: `{file_name}` | Sources: {source_urls} | Notes: {notes or '(none)'}"
@@ -1149,6 +1520,14 @@ async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None
         draft,
         "system",
         f"/validate_data file={file_name} status={output.get('status', 'unknown')}",
+    )
+    _track_paid_usage(
+        draft,
+        "validate_data_completed",
+        file_name=file_name,
+        status=output.get("status", "unknown"),
+        flag_count=len(flags),
+        elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
     )
 
     flags = output.get("flags", []) if isinstance(output.get("flags"), list) else []
@@ -1253,9 +1632,9 @@ async def on_chat_start() -> None:
     horizon_res = await cl.AskActionMessage(
         content="**Step 2 of 2 — Time horizon**\n\nWhat is the expected holding period?",
         actions=[
-            cl.Action(name="days", payload={"value": "days"}, label="Days (intraday – 1 week)"),
-            cl.Action(name="weeks", payload={"value": "weeks"}, label="Weeks (1 – 8 weeks)"),
-            cl.Action(name="months", payload={"value": "months"}, label="Months (2 – 12 months)"),
+            cl.Action(name="days", payload={"value": "days"}, label="Days (intraday â€“ 1 week)"),
+            cl.Action(name="weeks", payload={"value": "weeks"}, label="Weeks (1 â€“ 8 weeks)"),
+            cl.Action(name="months", payload={"value": "months"}, label="Months (2 â€“ 12 months)"),
             cl.Action(name="years", payload={"value": "years"}, label="Years (1 year+)"),
         ],
         timeout=300,
@@ -1264,6 +1643,12 @@ async def on_chat_start() -> None:
         draft.time_horizon = horizon_res.get("payload", {}).get("value") or None
 
     _save_pitch_snapshot(draft)
+    _track_paid_usage(
+        draft,
+        "chat_started",
+        one_shot_mode=bool(draft.one_shot_mode),
+        time_horizon=draft.time_horizon or "",
+    )
 
     greeting = (
         "# Quant Pitch Evaluator\n\n"
@@ -1281,8 +1666,9 @@ async def on_chat_start() -> None:
         f"{COMMANDS_TEXT}\n\n"
         "You do not need to run commands for normal flow; evaluation starts automatically when intake is complete.\n"
         "For event-driven one-shot theses, include `one_shot_mode=true` in your message or use `/oneshot on`.\n"
-        "Start by describing your thesis, stock ticker(s), and source URL(s).\n"
-        "Then upload your strategy `.py`/`.ipynb` file and/or price data `.csv`."
+        "Start by describing your thesis and stock ticker(s).\n"
+        "Then upload your strategy `.py`/`.ipynb` file.\n"
+        "If you upload additional supporting CSV/TSV datasets, include source URL(s) for provenance checks."
     )
     await cl.Message(content=greeting, author="Orchestrator").send()
     await cl.Message(content=_checklist_markdown(draft)).send()
@@ -1297,6 +1683,12 @@ async def on_message(message: cl.Message) -> None:
     added_files = _ingest_message_files(draft, message)
     if added_files:
         _append_chat_event(draft, "system", f"Uploaded files: {', '.join(added_files)}")
+        _track_paid_usage(
+            draft,
+            "files_uploaded",
+            file_count=len(added_files),
+            file_names=added_files,
+        )
         await cl.Message(content=f"Added {len(added_files)} file(s): {', '.join(added_files)}").send()
 
     if not content and not added_files:
@@ -1343,6 +1735,12 @@ async def on_message(message: cl.Message) -> None:
 
     if content:
         _append_chat_event(draft, "user", content)
+        _track_paid_usage(
+            draft,
+            "user_message",
+            content_length=len(content),
+            attached_file_count=len(added_files),
+        )
         heuristic_update_from_user_text(draft, content)
         _apply_clarification_update(draft, content)
         lowered = content.lower()

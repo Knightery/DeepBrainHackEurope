@@ -7,8 +7,10 @@ Submit a quantitative trading strategy for structured, multi-agent evaluation.
 - **Thesis** -- what is mispriced and why
 - **Time horizon** -- `days`, `weeks`, `months`, or `years`
 - **Stock tickers** -- e.g. `AAPL, MSFT`
-- **Source URLs** -- provenance links for all submitted data
-- **Strategy files** -- upload your `.py` or `.ipynb` strategy script and/or `.csv` price data
+- **Source URLs** -- provenance links for uploaded supporting CSV/TSV data files
+- **Strategy files** -- upload your `.py` or `.ipynb` strategy script
+
+Price data uploads are not required for notebook/script backtests. The backtest agent fetches market prices internally via Alpaca.
 
 ## Commands
 
@@ -30,5 +32,7 @@ Each evaluation runs these agents (visible as expandable steps in the chat):
 4. **Pipeline Auditor** -- reviews methodology for look-ahead bias, leakage, overfitting
 5. **CUA Data Fetcher** -- validates uploaded files against source URLs via browser automation
 6. **Scoring Engine** -- computes composite score (0-100) and capital allocation (USD)
+
+Scoring for non-one-shot pitches is driven by `strategy_scorer.py` output from the backtest agent.
 
 Upload files using the attachment button in the chat input.

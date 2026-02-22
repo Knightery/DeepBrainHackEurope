@@ -1,4 +1,4 @@
-"""
+﻿"""
 Live one-shot validation smoke test.
 
 Scenario: Consumer confidence as a causal driver of XRT (SPDR S&P Retail ETF) returns.
@@ -51,7 +51,7 @@ def _make_sentiment_returns(folder: Path) -> SimpleNamespace:
       week_ending, conf_index, prev_conf, survey_n, region_code,
       xrt_wkly_pct, notes
     ~10 % of xrt_wkly_pct values are NaN (data gaps).
-    Strong positive correlation: high confidence → positive retail returns.
+    Strong positive correlation: high confidence â†’ positive retail returns.
     """
     n = 90
     trend = np.linspace(95, 105, n)
@@ -86,7 +86,7 @@ def _make_analyst_track_record(folder: Path) -> SimpleNamespace:
     analyst_track_record.csv
     Intentionally opaque column names for forecast_prob / outcome:
       qtr_id, analyst_id, prob_call, was_right, call_direction, rationale_tag
-    BSS > 0, calibration gap ≤ 0.10.
+    BSS > 0, calibration gap â‰¤ 0.10.
     """
     n = 80
     # Simulate reasonably calibrated analysts
@@ -116,14 +116,14 @@ def _make_historical_episodes(folder: Path) -> SimpleNamespace:
     Intentionally messy: mixed date formats, extra label cols, column names
     that don't scream 'severity' or 'magnitude'.
       ep_id, event_label, trigger_yyyymm, conf_drop_pts, xrt_fwd3w_ret, sector_tag
-    Positive beta: larger confidence drops → larger XRT drawdowns.
+    Positive beta: larger confidence drops â†’ larger XRT drawdowns.
     """
     n = 22
     conf_drop = RNG.uniform(3, 20, n)          # severity
     xrt_drawdown = -conf_drop * 0.009 + RNG.normal(0, 0.015, n)  # magnitude (negative)
 
     # For Node 3 to pass we need CI lower > 0, so let's use absolute values
-    # and frame it as "confidence drop → magnitude of drawdown (positive number)"
+    # and frame it as "confidence drop â†’ magnitude of drawdown (positive number)"
     xrt_mag = np.abs(xrt_drawdown)  # positive: larger drop = bigger mag
 
     trigger_months = pd.date_range("2010-01", periods=n, freq="6ME").strftime("%Y-%m")
@@ -151,7 +151,7 @@ def _make_historical_episodes(folder: Path) -> SimpleNamespace:
 def main() -> None:
     print("\n" + "=" * 70)
     print("ONE-SHOT LIVE VALIDATION TEST")
-    print("Scenario: Consumer Sentiment → XRT Retail ETF (causal chain)")
+    print("Scenario: Consumer Sentiment â†’ XRT Retail ETF (causal chain)")
     print("=" * 70)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -165,7 +165,7 @@ def main() -> None:
         for f in (f_sentiment, f_track, f_episodes):
             p = Path(f.path)
             df = pd.read_csv(p)
-            print(f"  {p.name}: {len(df)} rows × {len(df.columns)} cols  "
+            print(f"  {p.name}: {len(df)} rows Ã— {len(df.columns)} cols  "
                   f"| columns: {list(df.columns)}")
 
         draft = SimpleNamespace(
@@ -177,7 +177,7 @@ def main() -> None:
                 "The most recent reading came in at a 3-year low, suggesting a meaningful drawdown "
                 "is likely over the short horizon."
             ),
-            methodology_summary=(
+            supporting_notes=(
                 "This is a causal-chain pitch. I believe there's roughly a 64% chance we see a "
                 "significant retail sector drawdown over the next two weeks, while options skew "
                 "and analyst consensus seems to imply something closer to 48%. "
@@ -206,7 +206,7 @@ def main() -> None:
         print(f"  latency_ms           : {ext.get('latency_ms', 'n/a')}")
         print("\n  column_mappings:")
         for role, mapping in (ext.get("column_mappings") or {}).items():
-            print(f"    {role:16s} → {mapping}")
+            print(f"    {role:16s} â†’ {mapping}")
         print("\n  numeric_params:")
         for k, v in (ext.get("numeric_params") or {}).items():
             if v is not None:
@@ -214,13 +214,13 @@ def main() -> None:
         if result.validation_questions:
             print("\n  extraction_questions:")
             for q in result.validation_questions:
-                print(f"    • {q}")
+                print(f"    â€¢ {q}")
 
         print("\n" + "-" * 70)
         print("NODE RESULTS")
         print("-" * 70)
         for node in result.artifacts.get("criteria", []):
-            status = "✓ PASS" if node.get("pass") else "✗ FAIL"
+            status = "âœ“ PASS" if node.get("pass") else "âœ— FAIL"
             print(f"  [{status}] {node['node']}")
             for k, v in node.get("details", {}).items():
                 print(f"           {k}: {v}")
@@ -244,3 +244,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

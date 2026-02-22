@@ -10,6 +10,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,12 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 load_dotenv()
+
+try:
+    from agent_skills import run_data_skill
+    _ALPACA_SKILL_AVAILABLE = True
+except ImportError:
+    _ALPACA_SKILL_AVAILABLE = False
 
 # Optional backtest agent and strategy scorer (requires anthropic package)
 try:
@@ -72,11 +79,11 @@ Questions rule:
 - When verdict=unclear or verdict=fabrication, populate `questions` with 1-3 specific, direct questions
   that would allow the user to resolve your uncertainty if answered honestly.
   Examples: "Can you share the raw source file before any preprocessing?"
-           "Your prices show zero variance from 2023-01-05 to 2023-01-12 — what caused this?"
-           "The declared ticker is AAPL but the price range matches TSLA for this period — please clarify."
+           "Your prices show zero variance from 2023-01-05 to 2023-01-12 â€” what caused this?"
+           "The declared ticker is AAPL but the price range matches TSLA for this period â€” please clarify."
 - When verdict=clean, leave `questions` empty.
 
-Output — strict JSON only:
+Output â€” strict JSON only:
 {"summary":"...","confidence":0.0,"flags":[{"code":"...","message":"..."}],"artifacts":{"verdict":"clean|fabrication|unclear","questions":[]}}
 """.strip()
 
@@ -84,30 +91,30 @@ CODING_ERRORS_VALIDATOR_PROMPT = """
 You are the Coding Errors Detector for quant pitch evaluation.
 Your PRIMARY job: detect unintentional ML/quant methodology mistakes that inflate backtest quality.
 You may note suspicious data patterns as secondary observations, but your verdict must reflect
-methodology quality only — not fraud.
+methodology quality only â€” not fraud.
 
 Verdict rules:
 - verdict=errors_found: one or more methodology errors that would materially inflate reported results.
 - verdict=clean: methodology is sound for the scope described.
 
 Methodology checklist:
-1) Look-ahead bias — features or targets derived using future data (negative shift, rolling windows not anchored to t-1)
-2) Feature leakage — target variable used as or directly derivable from input features
-3) Survivorship bias — universe constructed using post-period knowledge
-4) Overfitting / data snooping — hyperparameter search on the test set, too few observations for statistical significance
-5) Weak validation — no out-of-sample or walk-forward split documented
-6) Unrealistic assumptions — no transaction costs / slippage for high-frequency or daily rebalancing strategies
+1) Look-ahead bias â€” features or targets derived using future data (negative shift, rolling windows not anchored to t-1)
+2) Feature leakage â€” target variable used as or directly derivable from input features
+3) Survivorship bias â€” universe constructed using post-period knowledge
+4) Overfitting / data snooping â€” hyperparameter search on the test set, too few observations for statistical significance
+5) Weak validation â€” no out-of-sample or walk-forward split documented
+6) Unrealistic assumptions â€” no transaction costs / slippage for high-frequency or daily rebalancing strategies
 
 Questions rule:
 - When verdict=errors_found, populate `questions` with 1-4 specific, actionable questions that would let
   the user clarify or correct each detected issue.
   Each question should point at the specific problem found, e.g.:
-  "Your rolling mean uses a window of 20 bars with no shift — is the window anchored to the current bar
+  "Your rolling mean uses a window of 20 bars with no shift â€” is the window anchored to the current bar
    or the previous bar at prediction time?"
-  "No transaction cost assumption is documented for a daily rebalancing strategy — what cost did you assume?"
+  "No transaction cost assumption is documented for a daily rebalancing strategy â€” what cost did you assume?"
 - When verdict=clean, leave `questions` empty.
 
-Output — strict JSON only:
+Output â€” strict JSON only:
 {"summary":"...","confidence":0.0,"flags":[{"code":"...","message":"..."}],"artifacts":{"verdict":"clean|errors_found","questions":[]}}
 """.strip()
 
@@ -257,7 +264,7 @@ class PitchDraft:
     time_horizon: str | None = None
     tickers: list[str] = field(default_factory=list)
     source_urls: list[str] = field(default_factory=list)
-    methodology_summary: str = ""
+    supporting_notes: str = ""
     one_shot_mode: bool = False
     submitter: dict[str, Any] = field(default_factory=dict)
     uploaded_files: list[UploadedFile] = field(default_factory=list)
@@ -270,9 +277,11 @@ class PitchDraft:
                 missing.append(field_name)
         if not self.tickers:
             missing.append("tickers")
-        if not self.source_urls:
+        if _has_tabular_data_files(self.uploaded_files) and not self.source_urls:
             missing.append("source_urls")
         if not self.uploaded_files:
+            missing.append("uploaded_files")
+        elif (not self.one_shot_mode) and (not _has_strategy_script_files(self.uploaded_files)):
             missing.append("uploaded_files")
         return missing
 
@@ -292,7 +301,7 @@ class PitchDraft:
             "time_horizon": self.time_horizon,
             "tickers": self.tickers,
             "source_urls": self.source_urls,
-            "methodology_summary": self.methodology_summary,
+            "supporting_notes": self.supporting_notes,
             "one_shot_mode": self.one_shot_mode,
             "uploaded_file_names": [entry.name for entry in self.uploaded_files],
             "missing_fields": self.missing_fields(),
@@ -312,9 +321,9 @@ class PitchDraft:
         if incoming_tickers:
             self.tickers = sorted(set(self.tickers + incoming_tickers))
 
-        methodology = data.get("methodology_summary")
+        methodology = data.get("supporting_notes")
         if isinstance(methodology, str) and methodology.strip():
-            self.methodology_summary = methodology.strip()
+            self.supporting_notes = methodology.strip()
 
         incoming_urls = parse_source_urls(data.get("source_urls"))
         if incoming_urls:
@@ -330,16 +339,16 @@ def heuristic_update_from_user_text(draft: PitchDraft, text: str) -> None:
     if tickers:
         draft.tickers = sorted(set(draft.tickers + tickers))
 
-    # Time horizon is set via UI selection on chat start — do not infer from free text.
+    # Time horizon is set via UI selection on chat start â€” do not infer from free text.
 
     lowered = text.lower()
     if not draft.thesis and len(text.strip()) > 30:
         if any(token in lowered for token in ("thesis", "idea", "mispriced", "expect", "edge")):
             draft.thesis = text.strip()
 
-    if not draft.methodology_summary and len(text.strip()) > 40:
+    if not draft.supporting_notes and len(text.strip()) > 40:
         if any(token in lowered for token in ("method", "backtest", "data", "model", "signal", "features")):
-            draft.methodology_summary = text.strip()
+            draft.supporting_notes = text.strip()
 
 
 def _load_first_table(uploaded_files: list[UploadedFile]) -> tuple[pd.DataFrame | None, list[str]]:
@@ -418,11 +427,29 @@ def _methodology_score(text: str) -> tuple[float, list[str]]:
 
 
 def _match_rate(draft: PitchDraft) -> float:
-    if draft.source_urls and draft.uploaded_files:
+    has_tabular_data = _has_tabular_data_files(draft.uploaded_files)
+    if not has_tabular_data:
+        # No user-submitted tabular data to provenance-check.
+        return 1.0
+    if draft.source_urls:
         return 0.8
-    if draft.source_urls or draft.uploaded_files:
-        return 0.5
-    return 0.0
+    return 0.5
+
+
+def _has_tabular_data_files(uploaded_files: list[UploadedFile]) -> bool:
+    for file_entry in uploaded_files:
+        suffix = Path(file_entry.path).suffix.lower()
+        if suffix in {".csv", ".tsv"}:
+            return True
+    return False
+
+
+def _has_strategy_script_files(uploaded_files: list[UploadedFile]) -> bool:
+    for file_entry in uploaded_files:
+        suffix = Path(file_entry.path).suffix.lower()
+        if suffix in {".py", ".ipynb"}:
+            return True
+    return False
 
 
 _FILE_ROLE_CLASSIFIER_PROMPT = """
@@ -483,14 +510,14 @@ def _detect_file_roles(
     if not uploaded_files:
         return {"strategy_scripts": [], "data_files": [], "benchmark_files": []}
 
-    # Scripts are unambiguous — classify them immediately without an LLM call.
+    # Scripts are unambiguous â€” classify them immediately without an LLM call.
     strategy_scripts = [f for f in uploaded_files if Path(f.path).suffix.lower() in {".py", ".ipynb"}]
     csv_files = [f for f in uploaded_files if Path(f.path).suffix.lower() in {".csv", ".tsv"}]
 
     if not csv_files:
         return {"strategy_scripts": strategy_scripts, "data_files": [], "benchmark_files": []}
 
-    # If only one CSV/TSV, no LLM needed — it must be strategy data.
+    # If only one CSV/TSV, no LLM needed â€” it must be strategy data.
     if len(csv_files) == 1:
         return {"strategy_scripts": strategy_scripts, "data_files": csv_files, "benchmark_files": []}
 
@@ -663,6 +690,155 @@ def _series_stats(series: pd.Series) -> dict[str, float]:
     }
 
 
+def _normalize_backtest_window(start_raw: str, end_raw: str) -> tuple[str | None, str | None]:
+    start_text = str(start_raw or "").strip()
+    end_text = str(end_raw or "").strip()
+    if not start_text or not end_text:
+        return None, None
+
+    start_ts = pd.to_datetime(start_text, errors="coerce", utc=True)
+    end_ts = pd.to_datetime(end_text, errors="coerce", utc=True)
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        return None, None
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_text):
+        start_ts = start_ts.normalize()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_text):
+        end_ts = end_ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+
+    return (
+        start_ts.isoformat().replace("+00:00", "Z"),
+        end_ts.isoformat().replace("+00:00", "Z"),
+    )
+
+
+def _inferred_window_from_horizon(time_horizon: str | None) -> tuple[str, str]:
+    now = pd.Timestamp.utcnow().floor("s")
+    horizon = (time_horizon or "").strip().lower()
+    if horizon == "days":
+        start = now - timedelta(days=30)
+    elif horizon == "weeks":
+        start = now - timedelta(weeks=26)
+    elif horizon == "months":
+        start = now - timedelta(days=365)
+    elif horizon == "years":
+        start = now - timedelta(days=365 * 5)
+    else:
+        start = now - timedelta(days=365)
+    return (
+        start.isoformat().replace("+00:00", "Z"),
+        now.isoformat().replace("+00:00", "Z"),
+    )
+
+
+def _candidate_alpaca_timeframes(start_iso: str, end_iso: str) -> list[str]:
+    start_ts = pd.to_datetime(start_iso, errors="coerce", utc=True)
+    end_ts = pd.to_datetime(end_iso, errors="coerce", utc=True)
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        return ["1Day", "1Hour", "15Min"]
+
+    duration_days = max(float((end_ts - start_ts).total_seconds()) / 86400.0, 0.0)
+    if duration_days <= 2.0:
+        return ["1Min", "5Min", "15Min", "1Hour", "1Day"]
+    if duration_days <= 10.0:
+        return ["5Min", "15Min", "1Hour", "1Day"]
+    if duration_days <= 90.0:
+        return ["15Min", "1Hour", "1Day"]
+    return ["1Hour", "1Day"]
+
+
+def _alpaca_fallback_data_summary(
+    ticker: str,
+    backtest_start: str,
+    backtest_end: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not _ALPACA_SKILL_AVAILABLE:
+        return None, "Alpaca data skill is unavailable."
+
+    symbol = normalize_ticker(ticker)
+    if not symbol:
+        return None, f"Invalid ticker for Alpaca fallback: {ticker!r}"
+
+    start_iso, end_iso = _normalize_backtest_window(backtest_start, backtest_end)
+    if not start_iso or not end_iso:
+        return None, "Backtest window is missing or invalid."
+
+    attempts: list[str] = []
+    last_error = "Alpaca fallback fetch did not produce data."
+    for timeframe in _candidate_alpaca_timeframes(start_iso, end_iso):
+        for feed in ("sip", "iex"):
+            result = run_data_skill(
+                "alpaca_historical_bars",
+                {
+                    "symbol": symbol,
+                    "start": start_iso,
+                    "end": end_iso,
+                    "timeframe": timeframe,
+                    "feed": feed,
+                    "adjustment": "all",
+                    "sort": "asc",
+                    "limit": 10000,
+                    "max_pages": 100,
+                },
+            )
+            if result.get("status") != "ok":
+                message = str(result.get("summary", "")).strip() or "Unknown Alpaca fetch failure."
+                attempts.append(f"{timeframe}/{feed}: {message}")
+                last_error = message
+                continue
+
+            bars = result.get("bars", [])
+            if not isinstance(bars, list) or not bars:
+                attempts.append(f"{timeframe}/{feed}: no bars")
+                last_error = "Alpaca fallback returned no bars."
+                continue
+
+            frame = pd.DataFrame(bars)
+            if frame.empty:
+                attempts.append(f"{timeframe}/{feed}: empty DataFrame")
+                last_error = "Alpaca fallback returned an empty DataFrame."
+                continue
+
+            for required_col in ("timestamp", "close"):
+                if required_col not in frame.columns:
+                    attempts.append(f"{timeframe}/{feed}: missing column {required_col}")
+                    last_error = f"Alpaca fallback missing required column: {required_col}"
+                    frame = pd.DataFrame()
+                    break
+            if frame.empty:
+                continue
+
+            frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
+            frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+            frame = frame.dropna(subset=["close"]).sort_values("timestamp").reset_index(drop=True)
+            if frame.empty:
+                attempts.append(f"{timeframe}/{feed}: no valid close prices")
+                last_error = "Alpaca fallback bars had no valid close prices."
+                continue
+
+            close_series = frame["close"].dropna()
+            summary: dict[str, Any] = {
+                "source": "alpaca_fallback",
+                "ticker": symbol,
+                "timeframe": timeframe,
+                "feed": feed,
+                "window": {"start": start_iso, "end": end_iso},
+                "row_count": int(frame.shape[0]),
+                "column_count": int(frame.shape[1]),
+                "columns": list(frame.columns),
+                "head_records": _safe_head_records(frame, limit=40),
+                "close_stats": _series_stats(close_series),
+                "load_errors": [],
+                "attempted_timeframes": attempts + [f"{timeframe}/{feed}: ok ({int(frame.shape[0])} rows)"],
+            }
+            artifacts = result.get("artifacts")
+            if isinstance(artifacts, dict):
+                summary["fetch_artifacts"] = artifacts
+            return summary, None
+
+    return None, f"{last_error} Attempts: {'; '.join(attempts)[:600]}"
+
+
 def _build_validator_payload(
     draft: PitchDraft,
     frame: pd.DataFrame | None,
@@ -671,7 +847,53 @@ def _build_validator_payload(
     match_rate: float,
     sharpe: float,
     max_drawdown: float,
+    fallback_data_summary: dict[str, Any] | None = None,
+    strategy_file_names: list[str] | None = None,
+    backtest_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if frame is not None:
+        data_summary: dict[str, Any] = {
+            "row_count": int(frame.shape[0]),
+            "column_count": int(frame.shape[1]),
+            "columns": list(frame.columns),
+            "head_records": _safe_head_records(frame),
+            "close_stats": _series_stats(close_series),
+            "source": "uploaded_csv_tsv",
+        }
+    elif isinstance(fallback_data_summary, dict):
+        data_summary = {
+            "row_count": int(fallback_data_summary.get("row_count", 0)),
+            "column_count": int(fallback_data_summary.get("column_count", 0)),
+            "columns": list(fallback_data_summary.get("columns", [])),
+            "head_records": list(fallback_data_summary.get("head_records", [])),
+            "close_stats": dict(fallback_data_summary.get("close_stats", {})),
+            "source": str(fallback_data_summary.get("source", "alpaca_fallback")),
+        }
+        if "ticker" in fallback_data_summary:
+            data_summary["ticker"] = fallback_data_summary.get("ticker")
+        if "window" in fallback_data_summary:
+            data_summary["window"] = fallback_data_summary.get("window")
+        if "fetch_artifacts" in fallback_data_summary:
+            data_summary["fetch_artifacts"] = fallback_data_summary.get("fetch_artifacts")
+    else:
+        data_summary = {
+            "row_count": 0,
+            "column_count": 0,
+            "columns": [],
+            "head_records": [],
+            "close_stats": {},
+            "source": "none",
+        }
+
+    merged_load_errors: list[str] = []
+    for item in data_summary.get("load_errors", []):
+        if isinstance(item, str) and item not in merged_load_errors:
+            merged_load_errors.append(item)
+    for item in load_errors:
+        if isinstance(item, str) and item not in merged_load_errors:
+            merged_load_errors.append(item)
+    data_summary["load_errors"] = merged_load_errors
+
     return {
         "pitch": {
             "pitch_id": draft.pitch_id,
@@ -679,21 +901,17 @@ def _build_validator_payload(
             "time_horizon": draft.time_horizon,
             "tickers": draft.tickers,
             "source_urls": draft.source_urls,
-            "methodology_summary": draft.methodology_summary,
+            "supporting_notes": draft.supporting_notes,
+            "uploaded_file_names": [entry.name for entry in draft.uploaded_files],
+            "strategy_file_names": strategy_file_names or [],
         },
-        "data_summary": {
-            "row_count": int(frame.shape[0]) if frame is not None else 0,
-            "column_count": int(frame.shape[1]) if frame is not None else 0,
-            "columns": list(frame.columns) if frame is not None else [],
-            "head_records": _safe_head_records(frame),
-            "close_stats": _series_stats(close_series),
-            "load_errors": load_errors,
-        },
+        "data_summary": data_summary,
         "scoring_context": {
             "match_rate": round(match_rate, 4),
             "sharpe": round(sharpe, 4),
             "max_drawdown": round(max_drawdown, 4),
         },
+        "execution_context": backtest_context or {},
     }
 
 
@@ -1420,8 +1638,8 @@ def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, A
 
 
 def _run_llm_validators(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    max_workers = 1 if os.getenv("VALIDATOR_SERIAL_MODE", "1") == "1" else 2
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # Validator agents must execute concurrently so fabrication/coding checks run in parallel.
+    with ThreadPoolExecutor(max_workers=2) as executor:
         fabrication_future = executor.submit(
             _run_llm_validator,
             "fabrication_detector",
@@ -1434,16 +1652,8 @@ def _run_llm_validators(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
             CODING_ERRORS_VALIDATOR_PROMPT,
             payload,
         )
-        try:
-            fabrication_result = fabrication_future.result()
-        except Exception as exc:  # pragma: no cover - defensive
-            _validator_log("fabrication_detector", f"future_error={exc.__class__.__name__}: {exc}")
-            fabrication_result = _validator_error_result("fabrication_detector", time.perf_counter(), exc, 1)
-        try:
-            coding_result = coding_future.result()
-        except Exception as exc:  # pragma: no cover - defensive
-            _validator_log("coding_errors_detector", f"future_error={exc.__class__.__name__}: {exc}")
-            coding_result = _validator_error_result("coding_errors_detector", time.perf_counter(), exc, 1)
+        fabrication_result = fabrication_future.result()
+        coding_result = coding_future.result()
         return {
             "fabrication_detector": fabrication_result,
             "coding_errors_detector": coding_result,
@@ -1472,9 +1682,10 @@ class EvaluationResult:
 def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None = None) -> EvaluationResult:
     # Classify uploaded files first so CSV scoring uses the right data file.
     roles = _detect_file_roles(draft.uploaded_files, tickers=draft.tickers, thesis=draft.thesis)
-    scoring_files = roles["data_files"] if roles["data_files"] else draft.uploaded_files
-    frame, load_errors = _load_first_table(scoring_files)
-    method_score, methodology_warnings = _methodology_score(draft.methodology_summary)
+    has_tabular_data = bool(roles["data_files"] or roles["benchmark_files"])
+    scoring_files = roles["data_files"] if roles["data_files"] else []
+    frame, load_errors = _load_first_table(scoring_files) if scoring_files else (None, [])
+    method_score, methodology_warnings = _methodology_score(draft.supporting_notes)
 
     hard_reject_reasons: list[str] = []
     validator_flags: list[dict[str, str]] = []
@@ -1546,8 +1757,53 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                         f"Backtest agent failed after {backtest_result.attempt_count} attempt(s). "
                         f"Message: {backtest_result.message}"
                     )
+        elif roles["strategy_scripts"]:
+            auditor_flags.append(
+                {
+                    "code": "BACKTEST_INPUT_PREP_FAILED",
+                    "message": "Strategy files could not be prepared for backtest execution.",
+                }
+            )
+    elif roles["strategy_scripts"] and not _BACKTEST_AGENT_AVAILABLE:
+        auditor_flags.append(
+            {
+                "code": "BACKTEST_AGENT_UNAVAILABLE",
+                "message": "Backtest agent dependencies are unavailable (anthropic package/API key).",
+            }
+        )
 
-    if not draft.source_urls:
+    fallback_data_summary: dict[str, Any] | None = None
+    if frame is None and (not has_tabular_data):
+        fallback_ticker = draft.tickers[0] if draft.tickers else None
+        fallback_start = ""
+        fallback_end = ""
+        if (
+            backtest_result is not None
+            and getattr(backtest_result, "status", "") == "success"
+            and isinstance(getattr(backtest_result, "metrics", None), dict)
+        ):
+            metrics = backtest_result.metrics
+            fallback_ticker = normalize_ticker(str(metrics.get("ticker", "")).strip()) or fallback_ticker
+            fallback_start = str(metrics.get("backtest_start", "")).strip()
+            fallback_end = str(metrics.get("backtest_end", "")).strip()
+
+        if (not fallback_start) or (not fallback_end):
+            inferred_start, inferred_end = _inferred_window_from_horizon(draft.time_horizon)
+            fallback_start = fallback_start or inferred_start
+            fallback_end = fallback_end or inferred_end
+
+        if fallback_ticker and fallback_start and fallback_end:
+            fallback_data_summary, fallback_error = _alpaca_fallback_data_summary(
+                ticker=fallback_ticker,
+                backtest_start=fallback_start,
+                backtest_end=fallback_end,
+            )
+            if fallback_error:
+                load_errors.append(f"Alpaca validator fallback unavailable: {fallback_error}")
+        else:
+            load_errors.append("Alpaca validator fallback unavailable: missing ticker or date range.")
+
+    if has_tabular_data and not draft.source_urls:
         hard_reject_reasons.append("No source URL was provided for submitted data.")
         fetcher_flags.append(
             {
@@ -1587,13 +1843,33 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
     time_to_return_days: int | None = None
 
     if frame is None:
-        hard_reject_reasons.append("No parseable CSV/TSV data was found for scoring.")
-        validator_flags.append(
-            {
-                "code": "INSUFFICIENT_DATA",
-                "message": "Upload a non-empty CSV or TSV with a close price column.",
-            }
-        )
+        if has_tabular_data:
+            hard_reject_reasons.append("No parseable CSV/TSV data was found for scoring.")
+            validator_flags.append(
+                {
+                    "code": "INSUFFICIENT_DATA",
+                    "message": "Upload a non-empty CSV or TSV with a close price column.",
+                }
+            )
+        elif roles["strategy_scripts"]:
+            # Script/notebook-only submissions are valid: price history is fetched internally.
+            if fallback_data_summary is not None:
+                load_errors.append(
+                    "No CSV/TSV uploaded; validator used Alpaca fallback market data from backtest dates."
+                )
+                row_count = int(fallback_data_summary.get("row_count", 0) or 0)
+                symbol_count = 1
+            else:
+                load_errors.append("No CSV/TSV uploaded; backtest used internally fetched market data.")
+            data_quality_score = 1.0
+        else:
+            hard_reject_reasons.append("No parseable strategy input was found for scoring.")
+            validator_flags.append(
+                {
+                    "code": "INSUFFICIENT_DATA",
+                    "message": "Upload a strategy file (`.py` or `.ipynb`) to run backtesting.",
+                }
+            )
     else:
         row_count = int(frame.shape[0])
         if "symbol" in frame.columns:
@@ -1672,6 +1948,30 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         )
         match_rate = _match_rate(draft)
 
+    backtest_context: dict[str, Any] = {}
+    if backtest_result is not None:
+        backtest_context = {
+            "status": getattr(backtest_result, "status", ""),
+            "attempt_count": int(getattr(backtest_result, "attempt_count", 0) or 0),
+            "message": str(getattr(backtest_result, "message", "") or ""),
+        }
+        metrics_payload = getattr(backtest_result, "metrics", None)
+        if isinstance(metrics_payload, dict):
+            backtest_context["metrics_preview"] = {
+                "ticker": metrics_payload.get("ticker"),
+                "backtest_start": metrics_payload.get("backtest_start"),
+                "backtest_end": metrics_payload.get("backtest_end"),
+                "cagr": metrics_payload.get("cagr"),
+                "max_drawdown": metrics_payload.get("max_drawdown"),
+                "sharpe_ratio": metrics_payload.get("sharpe_ratio"),
+                "total_trades": metrics_payload.get("total_trades"),
+            }
+    elif roles["strategy_scripts"]:
+        backtest_context = {
+            "status": "not_executed",
+            "reason": "backtest_agent_unavailable_or_strategy_not_preparable",
+        }
+
     validator_payload = _build_validator_payload(
         draft=draft,
         frame=frame,
@@ -1680,6 +1980,9 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         match_rate=match_rate,
         sharpe=sharpe,
         max_drawdown=max_drawdown,
+        fallback_data_summary=fallback_data_summary,
+        strategy_file_names=[entry.name for entry in roles["strategy_scripts"]],
+        backtest_context=backtest_context,
     )
     llm_validators = _run_llm_validators(validator_payload)
     fabrication_result = llm_validators["fabrication_detector"]
@@ -1798,6 +2101,17 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                 "data_quality_score": round(data_quality_score, 4),
                 "row_count": row_count,
                 "symbol_count": symbol_count,
+                "data_source": ("uploaded_csv_tsv" if frame is not None else ("alpaca_fallback" if fallback_data_summary else "none")),
+                "alpaca_fallback_timeframe": (
+                    fallback_data_summary.get("timeframe")
+                    if isinstance(fallback_data_summary, dict)
+                    else None
+                ),
+                "alpaca_fallback_window": (
+                    fallback_data_summary.get("window")
+                    if isinstance(fallback_data_summary, dict)
+                    else None
+                ),
                 "llm_artifacts": fabrication_result["artifacts"],
             },
             "latency_ms": int(fabrication_result["latency_ms"]),
@@ -1928,7 +2242,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         report_lines.extend([
             "",
             "## Strategy Backtest Metrics",
-            f"- Period: `{m.get('backtest_start', '?')}` → `{m.get('backtest_end', '?')}`",
+            f"- Period: `{m.get('backtest_start', '?')}` â†’ `{m.get('backtest_end', '?')}`",
             f"- CAGR: `{float(m.get('cagr', 0)):.2%}`  (benchmark: `{float(m.get('benchmark_cagr', 0)):.2%}`)",
             f"- Excess return: `{float(m.get('excess_return', 0)):.2%}`  |  Alpha: `{float(m.get('alpha', 0)):.4f}`",
             f"- Sharpe: `{float(m.get('sharpe_ratio', 0)):.3f}`  |  Sortino: `{float(m.get('sortino_ratio', 0)):.3f}`  |  Calmar: `{float(m.get('calmar_ratio', 0)):.3f}`",
@@ -1939,7 +2253,7 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
             "## Strategy Scorer Component Breakdown",
         ])
         for _c in backtest_scored.component_scores:
-            _bar = "█" * int(_c.raw_score * 20) + "░" * (20 - int(_c.raw_score * 20))
+            _bar = "â–ˆ" * int(_c.raw_score * 20) + "â–‘" * (20 - int(_c.raw_score * 20))
             report_lines.append(
                 f"- `{_c.category}` **{_c.label}**: {_bar} `{_c.raw_score:.2f}` (w={_c.weight})"
             )
@@ -1981,3 +2295,4 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         agent_outputs=agent_outputs,
         report_markdown="\n".join(report_lines),
     )
+

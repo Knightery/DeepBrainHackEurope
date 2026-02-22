@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -36,7 +36,7 @@ def init_db() -> None:
                 time_horizon TEXT,
                 tickers_json TEXT NOT NULL DEFAULT '[]',
                 source_urls_json TEXT NOT NULL DEFAULT '[]',
-                methodology_summary TEXT NOT NULL DEFAULT '',
+                supporting_notes TEXT NOT NULL DEFAULT '',
                 one_shot_mode INTEGER NOT NULL DEFAULT 0,
                 overall_score REAL,
                 allocation_usd INTEGER,
@@ -61,6 +61,13 @@ def init_db() -> None:
                 ON pitch_messages(pitch_id, timestamp_utc ASC);
             """
         )
+        cols = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(pitches)").fetchall()
+            if isinstance(row["name"], str)
+        }
+        if "supporting_notes" not in cols:
+            conn.execute("ALTER TABLE pitches ADD COLUMN supporting_notes TEXT NOT NULL DEFAULT ''")
 
 
 def upsert_pitch_snapshot(draft: dict[str, Any], now_iso: str) -> None:
@@ -70,7 +77,7 @@ def upsert_pitch_snapshot(draft: dict[str, Any], now_iso: str) -> None:
             """
             INSERT INTO pitches (
                 pitch_id, created_at, updated_at, status, thesis, time_horizon,
-                tickers_json, source_urls_json, methodology_summary, one_shot_mode
+                tickers_json, source_urls_json, supporting_notes, one_shot_mode
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pitch_id) DO UPDATE SET
@@ -80,7 +87,7 @@ def upsert_pitch_snapshot(draft: dict[str, Any], now_iso: str) -> None:
                 time_horizon = excluded.time_horizon,
                 tickers_json = excluded.tickers_json,
                 source_urls_json = excluded.source_urls_json,
-                methodology_summary = excluded.methodology_summary,
+                supporting_notes = excluded.supporting_notes,
                 one_shot_mode = excluded.one_shot_mode
             """,
             (
@@ -92,7 +99,7 @@ def upsert_pitch_snapshot(draft: dict[str, Any], now_iso: str) -> None:
                 draft.get("time_horizon"),
                 json.dumps(draft.get("tickers", []), ensure_ascii=True),
                 json.dumps(draft.get("source_urls", []), ensure_ascii=True),
-                str(draft.get("methodology_summary", "")),
+                str(draft.get("supporting_notes", "")),
                 1 if bool(draft.get("one_shot_mode")) else 0,
             ),
         )
@@ -166,7 +173,7 @@ def _base_pitch_record(row: sqlite3.Row) -> dict[str, Any]:
         "time_horizon": row["time_horizon"],
         "tickers": _safe_json_list(row["tickers_json"]),
         "source_urls": _safe_json_list(row["source_urls_json"]),
-        "methodology_summary": row["methodology_summary"],
+        "supporting_notes": row["supporting_notes"],
         "one_shot_mode": bool(row["one_shot_mode"]),
         "overall_score": row["overall_score"],
         "allocation_usd": row["allocation_usd"],
@@ -246,3 +253,4 @@ def get_pitch_messages(pitch_id: str, limit: int = 500) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+

@@ -3,8 +3,13 @@ services:
     build: .
     env_file:
       - ../.env
-    ports:
-      - "5900:5900"   # VNC
-      - "6080:6080"   # noVNC — watch in browser at http://localhost:6080
+    # Ports are exposed but NOT bound to fixed host ports so that multiple
+    # CUA containers can run simultaneously without conflicts.
+    # To watch a specific container's desktop, run:
+    #   docker compose run --rm --service-ports data-fetcher ...
+    # which will dynamically assign host ports (visible in `docker ps`).
+    expose:
+      - "5900"   # VNC
+      - "6080"   # noVNC
     volumes:
       - ./downloads:/home/computeruse/Downloads

@@ -1,0 +1,24 @@
+{
+  "pitch_id": "pit_e6582cf6af09",
+  "created_at": "2026-02-21T23:59:08Z",
+  "status": "ready",
+  "thesis": "Mean reversion strategy on SPY using Z-scores. Long when Z < -1 and SMA > LMA (uptrend). Short when Z > 1 and SMA < LMA (downtrend). Exit when |Z| < 0.5.",
+  "time_horizon": "days",
+  "tickers": [
+    "SPY"
+  ],
+  "source_urls": [],
+  "supporting_notes": "you can read the whole thing to understand - lets do days as the time horizon, for backtest i don't have a CSV and assume standard OHLCV. the thesis is in the ipynb.",
+  "one_shot_mode": false,
+  "submitter": {},
+  "uploaded_files": [
+    {
+      "file_id": "fil_71fd2c9e9679",
+      "name": "mean_reversion.ipynb",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_e6582cf6af09\\uploads\\mean_reversion.ipynb",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 161571,
+      "sha256": "9d56f63b063476d60339553691def5d853649275b51d9f0b34ec4b7b93ae2e2e"
+    }
+  ]
+}

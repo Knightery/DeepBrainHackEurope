@@ -9,9 +9,10 @@ Quant Pitch Evaluator helps strong independent quants submit stock ideas and get
 ## What the product does
 
 - Collects a pitch through an interactive chat workflow.
-- Standardizes core inputs (thesis, horizon, stocks, methodology, sources).
-- Runs parallel evaluators to assess data quality, methodology risk, and performance metrics.
+- Standardizes core inputs (thesis, horizon, stocks, sources, supporting notes).
+- Runs parallel evaluators to assess data quality, coding risk, and performance metrics.
 - **Runs a Claude backtest agent** to generate and execute a standardized runner from the user's strategy script, computing all scored metrics automatically.
+- Uses `strategy_scorer.py` as the canonical scoring engine for non-one-shot pitches.
 - Produces a final score, recommendation, and allocation amount.
 - Supports final human reviewer approval or rejection.
 
@@ -25,18 +26,20 @@ Quant Pitch Evaluator helps strong independent quants submit stock ideas and get
    - stock ticker(s) (just symbols like `AAPL, MSFT`),
    - source URL(s) when supporting data files are submitted.
 4. User uploads files:
-   - At least one strategy/signal file is required for evaluation.
-   - Preferred for backtest: **strategy script** (`.py` or `.ipynb`).
-   - Supporting data files (price/signal/benchmark CSVs) are optional.
+    - At least one strategy/signal file is required for evaluation.
+    - Preferred for backtest: **strategy script** (`.py` or `.ipynb`).
+    - Supporting CSV/TSV data files are optional.
+    - Price CSV uploads are optional and never required for strategy notebooks/scripts (prices are fetched internally via Alpaca during backtesting).
 5. Once intake is complete, evaluation auto-runs (chat-style; commands are optional).
 6. Before scoring, CUA automatically validates every uploaded data file against submitted source URLs.
 7. For non-one-shot pitches, backtest is required before final review submission.
-8. For event-driven non-repeatable theses, user can use `/oneshot on` or include `one_shot_mode=true` in chat.
-9. Evaluation outcome:
+8. For `.py`/`.ipynb` strategy submissions, Fabrication Detector and Pipeline Auditor always run in parallel.
+9. For event-driven non-repeatable theses, user can use `/oneshot on` or include `one_shot_mode=true` in chat.
+10. Evaluation outcome:
    - fabricated/cheating signal -> `Goodbye.`
    - missing/unclear validation aspects -> clarification loop and `/evaluate`
    - clean validation -> ready for final review with `Congrats!`
-7. User receives score + report + allocation recommendation once ready for final review.
+11. User receives score + report + allocation recommendation once ready for final review.
 
 ## Why this structure
 
@@ -72,6 +75,12 @@ Model configuration is environment-driven:
 - App + evaluators read `GEMINI_MODEL` from `.env`.
 - CUA fetcher reads `ANTHROPIC_MODEL` from `.env`.
 - Backtest agent reads `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` from `.env` (same key as CUA, but used directly in-process — no Docker required).
+- Paid usage tracking reads:
+  - `PAID_API_KEY` (required to send usage signals)
+  - `PAID_EVENT_NAME` (optional, defaults to `eva_by_anyquant`)
+  - `PAID_EXTERNAL_PRODUCT_ID` (optional, defaults to `quant_pitch_evaluator`)
+  - `PAID_EXTERNAL_CUSTOMER_ID` (optional global override)
+  - `PAID_USAGE_ENABLED` (`true`/`false`, defaults to enabled when `PAID_API_KEY` is set)
 
 ## Optional: CUA data fetcher (Docker)
 
@@ -86,7 +95,12 @@ docker compose build
 docker compose run --rm --remove-orphans data-fetcher "https://www.netflix.com/tudum/top10" "Validate downloaded data against reference file" "reference_user_file.csv"
 ```
 
-Watch the live desktop at `http://localhost:6080`.
+Multiple CUA containers run **simultaneously** when a pitch has more than one data file — each file gets its own isolated container. Host VNC/noVNC ports are **not** statically bound, which allows concurrent runs without port conflicts. To watch a specific container's desktop, use `--service-ports` to get dynamically assigned host ports:
+
+```powershell
+docker compose run --rm --service-ports data-fetcher ...
+# then check `docker ps` for the assigned host port → open http://localhost:<port>
+```
 
 Model selection:
 
@@ -108,7 +122,7 @@ Important: `docker run build` is not a valid build command. Use `docker compose 
 ## Principles
 
 - Keep user inputs minimal but meaningful.
-- Keep scoring deterministic in MVP.
+- Use `strategy_scorer.py` as the canonical scoring system in MVP.
 - Prefer clarity and auditability over complexity.
 
 ## One-shot strategy mode
@@ -121,13 +135,13 @@ For single-event strategies (where Sharpe/win-rate are not meaningful), use:
 
 Then run `/evaluate`. The system returns a binary recommendation (`VALID` / `NOT_VALID`) and does not assign USD allocation.
 
-**Write naturally — no magic keywords required.** An LLM extraction agent reads your thesis, methodology, and CSV column names/samples to automatically infer the event type, map columns to the right statistical roles, and parse numeric assumptions from free-form text (e.g. "I think there's a 65% chance the deal closes").
+**Write naturally — no magic keywords required.** An LLM extraction agent reads your thesis, supporting notes, and CSV column names/samples to automatically infer the event type, map columns to the right statistical roles, and parse numeric assumptions from free-form text (e.g. "I think there's a 65% chance the deal closes").
 
 Minimum one-shot inputs:
 - **Node 1** (causal chain only): CSV with ≥30 rows containing your causal driver series and the target asset return side-by-side. Column names can be anything.
 - **Node 2**: CSV with ≥20 rows of probability estimates (0–1) and binary realized outcomes (0 or 1). Column names can be anything.
 - **Node 3** (causal chain only): CSV with ≥8 historical episodes showing driver intensity and resulting price change. Column names can be anything.
-- **Node 4**: Your probability estimate, market-implied probability, and upside/downside payoffs — described conversationally in your methodology text.
+- **Node 4**: Your probability estimate, market-implied probability, and upside/downside payoffs — described conversationally in your supporting notes.
 
 The event type (causal chain, binary event, or deal spread) is inferred automatically from your thesis. If extraction confidence is low, the system widens uncertainty and asks a clarifying question instead of failing silently.
 

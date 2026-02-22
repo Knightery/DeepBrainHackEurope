@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from pitch_engine import _review_download_match_with_llm, _run_llm_validator
+from pitch_engine import _review_download_match_with_llm, _run_llm_validator, _run_llm_validators
 
 
 def _fake_response(text: str, parsed=None):
@@ -15,6 +15,23 @@ def _fake_response(text: str, parsed=None):
 
 
 class ValidatorRetryTests(unittest.TestCase):
+    @patch("pitch_engine.ThreadPoolExecutor")
+    def test_run_llm_validators_forces_parallel_pool(self, mock_pool_cls: Mock) -> None:
+        fake_pool = Mock()
+        mock_pool_cls.return_value.__enter__.return_value = fake_pool
+
+        fabrication_future = Mock()
+        coding_future = Mock()
+        fabrication_future.result.return_value = {"status": "ok", "flags": []}
+        coding_future.result.return_value = {"status": "ok", "flags": []}
+        fake_pool.submit.side_effect = [fabrication_future, coding_future]
+
+        result = _run_llm_validators({"payload": 1})
+
+        mock_pool_cls.assert_called_once_with(max_workers=2)
+        self.assertIn("fabrication_detector", result)
+        self.assertIn("coding_errors_detector", result)
+
     @patch.dict(
         "os.environ",
         {

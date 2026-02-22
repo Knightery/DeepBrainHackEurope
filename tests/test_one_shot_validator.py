@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import unittest
@@ -59,7 +59,7 @@ class OneShotValidatorTests(unittest.TestCase):
 
             draft = SimpleNamespace(
                 uploaded_files=uploaded_files,
-                methodology_summary="causal chain wheat → MCD",
+                supporting_notes="causal chain wheat â†’ MCD",
             )
 
             mock_extraction = _make_extraction(
@@ -90,7 +90,7 @@ class OneShotValidatorTests(unittest.TestCase):
             relationship = pd.DataFrame({"wheat_price": [1, 2, 3], "mcd_return": [0.1, 0.2, 0.1]})
             uploaded_files = [self._write_csv(base, "small.csv", relationship)]
 
-            draft = SimpleNamespace(uploaded_files=uploaded_files, methodology_summary="causal pitch")
+            draft = SimpleNamespace(uploaded_files=uploaded_files, supporting_notes="causal pitch")
 
             # Extraction maps columns but data is too small; params mostly absent
             mock_extraction = _make_extraction(
@@ -117,7 +117,7 @@ class OneShotValidatorTests(unittest.TestCase):
             uploaded_files = [self._write_csv(base, "node2.csv", calibration)]
             draft = SimpleNamespace(
                 uploaded_files=uploaded_files,
-                methodology_summary="binary event FDA approval",
+                supporting_notes="binary event FDA approval",
             )
 
             mock_extraction = _make_extraction(
@@ -146,7 +146,7 @@ class OneShotValidatorTests(unittest.TestCase):
             uploaded_files = [self._write_csv(base, "node2.csv", calibration)]
             draft = SimpleNamespace(
                 uploaded_files=uploaded_files,
-                methodology_summary="deal spread acquisition",
+                supporting_notes="deal spread acquisition",
             )
 
             mock_extraction = _make_extraction(
@@ -169,3 +169,4 @@ class OneShotValidatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

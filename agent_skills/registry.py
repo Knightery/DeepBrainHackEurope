@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .alpaca_historical import fetch_alpaca_historical_bars
+from .solana_xstocks import fetch_solana_xstocks_bars
 
 SkillRunner = Callable[[dict[str, Any]], dict[str, Any]]
 
 _SKILL_REGISTRY: dict[str, SkillRunner] = {
     "alpaca_historical_bars": fetch_alpaca_historical_bars,
+    "solana_xstocks_bars": fetch_solana_xstocks_bars,
 }
 
 

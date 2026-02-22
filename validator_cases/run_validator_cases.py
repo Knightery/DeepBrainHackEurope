@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -41,7 +41,7 @@ def build_cases() -> list[PitchDraft]:
         time_horizon="days",
         tickers=["AAPL"],
         source_urls=["https://example.com/aapl-history"],
-        methodology_summary=(
+        supporting_notes=(
             "We denoise the signal by creating a direction feature from one-step shifted returns, "
             "then trade with a one-day lag. Validation is based on historical holdout windows."
         ),
@@ -56,7 +56,7 @@ def build_cases() -> list[PitchDraft]:
         time_horizon="weeks",
         tickers=["MSFT"],
         source_urls=["https://example.com/msft-history"],
-        methodology_summary=(
+        supporting_notes=(
             "Features (mom_5, mom_10, vol_10) are standardized using StandardScaler then fed into "
             "logistic regression. We use an 80/20 time-ordered split; accuracy and Sharpe are "
             "computed on the held-out 20%."
@@ -75,13 +75,13 @@ def build_cases() -> list[PitchDraft]:
         time_horizon="days",
         tickers=["BACKTST"],
         source_urls=["https://example.com/backtst-simulated-history"],
-        methodology_summary=(
+        supporting_notes=(
             "Simulated ETF (BACKTST), ~2 years of daily data. Features: 21-day momentum (mom_21), "
             "63-day momentum (mom_63), and 21-day realized volatility (rvol_21), all computed from "
             "lagged closes (t-1 anchor, no look-ahead). First 63 warmup rows dropped before fitting. "
             "StandardScaler fitted on training rows only (75% time-ordered split) then applied to "
             "the held-out test set. Logistic regression (C=1.0) trained on training window; "
-            "next-day direction predicted and position sized ±1 on each trading day. "
+            "next-day direction predicted and position sized Â±1 on each trading day. "
             "Annualized Sharpe and accuracy reported on the 25% OOS walk-forward window. "
             "Transaction cost: 1bp per round-trip on each daily trade."
         ),
@@ -170,3 +170,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

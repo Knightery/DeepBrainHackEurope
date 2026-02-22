@@ -46,7 +46,7 @@ load_dotenv()
 # Config
 # ---------------------------------------------------------------------------
 
-BACKTEST_TIMEOUT_SECONDS = int(os.getenv("BACKTEST_TIMEOUT_SECONDS", "120"))
+BACKTEST_TIMEOUT_SECONDS = int(os.getenv("BACKTEST_TIMEOUT_SECONDS", "1200"))
 BACKTEST_MAX_ATTEMPTS = int(os.getenv("BACKTEST_MAX_ATTEMPTS", "3"))
 _ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-5-20251101")
 
@@ -114,7 +114,7 @@ Required JSON fields:
 """.strip()
 
 # ---------------------------------------------------------------------------
-# Alpaca benchmark fetch snippet — injected verbatim into every generated script.
+# Alpaca benchmark fetch snippet â€” injected verbatim into every generated script.
 # ---------------------------------------------------------------------------
 ALPACA_BENCHMARK_SNIPPET = '''
 def _fetch_benchmark_alpaca(
@@ -128,13 +128,14 @@ def _fetch_benchmark_alpaca(
     sort: str = "asc",
 ) -> "pd.DataFrame":
     """
-    Fetch benchmark close prices from Alpaca Markets for buy-and-hold benchmark.
+    Fetch OHLCV prices from Alpaca Markets.
     Supports daily or intraday bars depending on `timeframe`.
-    Returns a DataFrame with columns [date, close] sorted by timestamp.
-    Raises RuntimeError on any failure — no silent fallbacks.
+    Returns a DataFrame sorted by timestamp with lowercase OHLCV columns and
+    common strategy aliases (Open/High/Low/Close/Volume/Adj Close).
+    Raises RuntimeError on any failure; no silent fallbacks.
     """
     import os, json, urllib.request, urllib.parse, urllib.error, re
-    api_key    = os.getenv("ALPACA_API_KEY", "")
+    api_key = os.getenv("ALPACA_API_KEY", "")
     api_secret = os.getenv("ALPACA_API_SECRET", "")
     if not api_key or not api_secret:
         raise RuntimeError("ALPACA_API_KEY or ALPACA_API_SECRET environment variable is not set.")
@@ -160,43 +161,60 @@ def _fetch_benchmark_alpaca(
         raise RuntimeError(f"Invalid Alpaca limit '{limit}'.") from exc
 
     base_url = "https://data.alpaca.markets/v2/stocks/bars"
-    headers  = {
-        "APCA-API-KEY-ID":     api_key,
+    headers = {
+        "APCA-API-KEY-ID": api_key,
         "APCA-API-SECRET-KEY": api_secret,
-        "Accept":              "application/json",
+        "Accept": "application/json",
     }
     bars = []
-    page_token = None
-    while True:
-        params = {
-            "symbols":    ticker,
-            "timeframe":  timeframe,
-            "start":      start,
-            "end":        end,
-            "adjustment": adjustment,
-            "feed":       feed,
-            "limit":      str(limit),
-            "sort":       sort,
-        }
-        if page_token:
-            params["page_token"] = page_token
-        url = base_url + "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"Alpaca API HTTP error {exc.code}: {exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Alpaca API network error: {exc.reason}") from exc
+    feed_candidates = [feed] if feed != "sip" else ["sip", "iex"]
+    last_http_error = None
+    chosen_feed = None
+    for feed_candidate in feed_candidates:
+        bars = []
+        page_token = None
+        request_failed = False
+        while True:
+            params = {
+                "symbols": ticker,
+                "timeframe": timeframe,
+                "start": start,
+                "end": end,
+                "adjustment": adjustment,
+                "feed": feed_candidate,
+                "limit": str(limit),
+                "sort": sort,
+            }
+            if page_token:
+                params["page_token"] = page_token
+            url = base_url + "?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode())
+            except urllib.error.HTTPError as exc:
+                request_failed = True
+                last_http_error = (exc.code, exc.reason, feed_candidate)
+                break
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Alpaca API network error: {exc.reason}") from exc
 
-        symbol_bars = data.get("bars", {}).get(ticker.upper(), [])
-        bars.extend(symbol_bars)
-        page_token = data.get("next_page_token")
-        if not page_token:
+            symbol_bars = data.get("bars", {}).get(ticker.upper(), [])
+            bars.extend(symbol_bars)
+            page_token = data.get("next_page_token")
+            if not page_token:
+                break
+
+        if not request_failed and bars:
+            chosen_feed = feed_candidate
             break
 
     if not bars:
+        if last_http_error is not None:
+            code, reason, failing_feed = last_http_error
+            raise RuntimeError(
+                f"Alpaca API HTTP error {code}: {reason} (feed={failing_feed}, tried={feed_candidates})"
+            )
         raise RuntimeError(
             f"Alpaca returned 0 bars for {ticker} between {start} and {end}. "
             "Check that the ticker is valid and the date range covers trading days."
@@ -204,12 +222,231 @@ def _fetch_benchmark_alpaca(
 
     import pandas as pd
     df = pd.DataFrame(bars)
-    # Alpaca bar fields: t=timestamp, c=close, o=open, h=high, l=low, v=volume, vw=vwap
-    df["date"]  = pd.to_datetime(df["t"], errors="coerce", utc=True).dt.tz_localize(None)
-    df["close"] = pd.to_numeric(df["c"], errors="coerce")
-    df = df[["date", "close"]].dropna().drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+    # Alpaca fields: t(timestamp), o(open), h(high), l(low), c(close), v(volume), vw(vwap), n(trade_count)
+    df["date"] = pd.to_datetime(df.get("t"), errors="coerce", utc=True).dt.tz_localize(None)
+    df["open"] = pd.to_numeric(df.get("o"), errors="coerce")
+    df["high"] = pd.to_numeric(df.get("h"), errors="coerce")
+    df["low"] = pd.to_numeric(df.get("l"), errors="coerce")
+    df["close"] = pd.to_numeric(df.get("c"), errors="coerce")
+    df["volume"] = pd.to_numeric(df.get("v"), errors="coerce")
+    df["vwap"] = pd.to_numeric(df.get("vw"), errors="coerce")
+    df["trade_count"] = pd.to_numeric(df.get("n"), errors="coerce")
+    df = (
+        df[["date", "open", "high", "low", "close", "volume", "vwap", "trade_count"]]
+        .dropna(subset=["date", "close"])
+        .drop_duplicates(subset=["date"])
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
     if df.empty:
         raise RuntimeError(f"Alpaca bars for {ticker} contained no parseable close prices.")
+
+    # Common aliases used by many notebooks/scripts.
+    df["Open"] = df["open"]
+    df["High"] = df["high"]
+    df["Low"] = df["low"]
+    df["Close"] = df["close"]
+    df["Volume"] = df["volume"]
+    df["Adj Close"] = df["close"]
+    df["alpaca_feed"] = chosen_feed or feed
+    return df
+'''.strip()
+
+SOLANA_BENCHMARK_SNIPPET = '''
+def _fetch_benchmark_solana_xstocks(
+    ticker: str,
+    start: str,
+    end: str,
+    timeframe: str = "1D",
+    currency: str = "usd",
+) -> "pd.DataFrame":
+    """
+    Fetch OHLCV bars for Solana xStocks from Birdeye.
+    `ticker` can be an xStock symbol (e.g., TSLAx) or a Solana mint address.
+    Raises RuntimeError on failure.
+    """
+    import os, json, urllib.request, urllib.parse, urllib.error, datetime, re
+    import pandas as pd
+
+    api_key = os.getenv("BIRDEYE_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("BIRDEYE_API_KEY environment variable is not set.")
+
+    mint_map = {
+        "AAPLX": "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp",
+        "ABBVX": "XswbinNKyPmzTa5CskMbCPvMW6G5CMnZXZEeQSSQoie",
+        "ABTX": "XsHtf5RpxsQ7jeJ9ivNewouZKJHbPxhPoEy6yYvULr7",
+        "ACNX": "Xs5UJzmCRQ8DWZjskExdSQDnbE6iLkRu2jjrRAB1JSU",
+        "AMBRX": "XsaQTCgebC2KPbf27KUhdv5JFvHhQ4GDAPURwrEhAzb",
+        "AMDX": "XsXcJ6GZ9kVnjqGsjBnktRcuwMBmvKWh8S93RefZ1rF",
+        "AMZNX": "Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg",
+        "APPX": "XsPdAVBi8Zc1xvv53k4JcMrQaEDTgkGqKYeh7AYgPHV",
+        "AVGOX": "XsgSaSvNSqLTtFuyWPBhK9196Xb9Bbdyjj4fH3cPJGo",
+        "AZNX": "Xs3ZFkPYT2BN7qBMqf1j1bfTeTm1rFzEFSsQ1z3wAKU",
+        "BACX": "XswsQk4duEQmCbGzfqUUWYmi7pV7xpJ9eEmLHXCaEQP",
+        "BMNRX": "XsrBCwaH8c46xiqXBChzobgufRKxQxAWUWbndgBNzFn",
+        "BRK.BX": "Xs6B6zawENwAbWVi7w92rjazLuAr5Az59qgWKcNb45x",
+        "BTBTX": "XsPLBFy59Q3hY59KLAJur8QyvziMF4xUxGTxXqXE7cT",
+        "BTGOX": "XsvHMmbDcd14DHHW16PkxPGW7ks77ehxUv1E9Zmxgj4",
+        "CMCSAX": "XsvKCaNsxg2GN8jjUmq71qukMJr7Q1c5R2Mk9P8kcS8",
+        "COINX": "Xs7ZdzSHLU9ftNJsii5fCeJhoRWSC32SQGzGQtePxNu",
+        "COPXX": "XsybfiKkD4UmjkAGT2uR8X2sq9AWFtvGJM2KTffoALZ",
+        "CRCLX": "XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
+        "CRMX": "XsczbcQ3zfcgAEt9qHQES8pxKAVG5rujPSHQEXi4kaN",
+        "CRWDX": "Xs7xXqkcK7K8urEqGg52SECi79dRp2cEKKuYjUePYDw",
+        "CSCOX": "Xsr3pdLQyXvDJBFgpR5nexCEZwXvigb8wbPYp4YoNFf",
+        "CVXX": "XsNNMt7WTNA2sV3jrb1NNfNgapxRF5i4i6GcnTRRHts",
+        "DFDVX": "Xs2yquAgsHByNzx68WJC55WHjHBvG9JsMB7CWjTLyPy",
+        "DHRX": "Xseo8tgCZfkHxWS9xbFYeKFyMSbWEvZGFV1Gh53GtCV",
+        "GLDX": "Xsv9hRk1z5ystj9MhnA7Lq4vjSsLwzL2nxrwmwtD3re",
+        "GMEX": "Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc",
+        "GOOGLX": "XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN",
+        "GSX": "XsgaUyp4jd1fNBCxgtTKkW64xnnhQcvgaxzsbAq5ZD1",
+        "HDX": "XszjVtyhowGjSC5odCqBpW1CtXXwXjYokymrk7fGKD3",
+        "HONX": "XsRbLZthfABAPAfumWNEJhPyiKDW6TvDVeAeW7oKqA2",
+        "HOODX": "XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg",
+        "IBMX": "XspwhyYPdWVM8XBHZnpS9hgyag9MKjLRyE3tVfmCbSr",
+        "IEMGX": "XsFnZawJdLdXfBSEt5Vw29K5vdBiHotdPLjUPafpfHs",
+        "IJRX": "XsyZcb97BzETAqi9BoP2C9D196MiMNBisGMVNje2Thz",
+        "INTCX": "XshPgPdXFRWB8tP1j82rebb2Q9rPgGX37RuqzohmArM",
+        "IWMX": "XsbELVbLGBkn7xfMfyYuUipKGt1iRUc2B7pYRvFTFu3",
+        "JNJX": "XsGVi5eo1Dh2zUpic4qACcjuWGjNv8GCt3dm5XcX6Dn",
+        "JPMX": "XsMAqkcKsUewDrzVkait4e5u4y8REgtyS7jWgCpLV2C",
+        "KOX": "XsaBXg8dU5cPM6ehmVctMkVqoiRG2ZjMo1cyBJ3AykQ",
+        "KRAQX": "XsAiRejKuvLAdq9KtedrMSrabz7SWdzKoVK6Qgac1Ki",
+        "LINX": "XsSr8anD1hkvNMu8XQiVcmiaTP7XGvYu7Q58LdmtE8Z",
+        "LLYX": "Xsnuv4omNoHozR6EEW5mXkw8Nrny5rB3jVfLqi6gKMH",
+        "MAX": "XsApJFV9MAktqnAc6jqzsHVujxkGm9xcSUffaBoYLKC",
+        "MCDX": "XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2",
+        "MDTX": "XsDgw22qRLTv5Uwuzn6T63cW69exG41T6gwQhEK22u2",
+        "METAX": "Xsa62P5mvPszXL1krVUnU5ar38bBSVcWAB6fmPCo5Zu",
+        "MRKX": "XsnQnU7AdbRZYe2akqqpibDdXjkieGFfSkbkjX1Sd1X",
+        "MRVLX": "XsuxRGDzbLjnJ72v74b7p9VY6N66uYgTCyfwwRjVCJA",
+        "MSFTX": "XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX",
+        "MSTRX": "XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ",
+        "NFLXX": "XsEH7wWfJJu2ZT3UCFeVfALnVA6CP5ur7Ee11KmzVpL",
+        "NVDAX": "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+        "NVOX": "XsfAzPzYrYjd4Dpa9BU3cusBsvWfVB9gBcyGC87S57n",
+        "OPENX": "XsGtpmjhmC8kyjVSWL4VicGu36ceq9u55PTgF8bhGv6",
+        "ORCLX": "XsjFwUPiLofddX5cWFHW35GCbXcSu1BCUGfxoQAQjeL",
+        "PALLX": "XsTTtPA5V19YwHKDv4xeVXNM6kdsQNJvg3MyWkRUckt",
+        "PEPX": "Xsv99frTRUeornyvCfvhnDesQDWuvns1M852Pez91vF",
+        "PFEX": "XsAtbqkAP1HJxy7hFDeq7ok6yM43DQ9mQ1Rh861X8rw",
+        "PGX": "XsYdjDjNUygZ7yGKfQaB6TxLh2gC6RRjzLtLAGJrhzV",
+        "PLTRX": "XsoBhf2ufR8fTyNSjqfU71DYGaE6Z3SUGAidpzriAA4",
+        "PMX": "Xsba6tUnSjDae2VcopDB6FGGDaxRrewFCDa5hKn5vT3",
+        "PPLTX": "Xst6eFD4YT6sz9RLMysN9SyvaZWtraSdVJQGu5ZkAme",
+        "QQQX": "Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ",
+        "SCHFX": "XsWAnFM77x6YvpdaZoos79R12o4Yj4r7EVkaTWddzhU",
+        "SLVX": "XsxAd6okt8y1RRK6gNg7iJaqiWNiq5Md5EDf3ZrF2dm",
+        "SPYX": "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W",
+        "STRCX": "Xs78JED6PFZxWc2wCEPspZW9kL3Se5J7L5TChKgsidH",
+        "TBLLX": "XsqBC5tcVQLYt8wqGCHRnAUUecbRYXoJCReD6w7QEKp",
+        "TMOX": "Xs8drBWy3Sd5QY3aifG9kt9KFs2K3PGZmx7jWrsrk57",
+        "TONXX": "XscE4GUcsYhcyZu5ATiGUMmhxYa1D5fwbpJw4K6K4dp",
+        "TQQQX": "XsjQP3iMAaQ3kQScQKthQpx9ALRbjKAjQtHg6TFomoc",
+        "TSLAX": "XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB",
+        "UNHX": "XszvaiXGPwvk2nwb3o9C1CX4K6zH8sez11E6uyup6fe",
+        "VTIX": "XsssYEQjzxBCFgvYFFNuhJFBeHNdLWYeUSP8F45cDr9",
+        "VTX": "XsEdDDTcVGJU6nvdRdVnj53eKTrsCkvtrVfXGmUK68V",
+        "VX": "XsqgsbXwWogGJsNcVZ3TyVouy2MbTkfCFhCGGGcQZ2p",
+        "WMTX": "Xs151QeqTCiuKtinzfRATnUESM2xTU6V9Wy8Vy538ci",
+        "XOMX": "XsaHND8sHyfMfsWPj6kSdd5VwvCayZvjYgKmmcNL5qh",
+    }
+    symbol = str(ticker or "").strip()
+    if not symbol:
+        raise RuntimeError("Ticker is required for Solana benchmark fetch.")
+
+    mint = mint_map.get(symbol.upper())
+    if mint is None:
+        if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", symbol):
+            mint = symbol
+        else:
+            raise RuntimeError(
+                f"Unknown xStock ticker '{symbol}'. Provide a Solana mint address or supported xStock symbol."
+            )
+
+    timeframe = str(timeframe or "1D").strip()
+    valid_timeframes = {"1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "8H", "12H", "1D", "3D", "1W", "1M"}
+    if timeframe not in valid_timeframes:
+        raise RuntimeError(f"Invalid Birdeye timeframe '{timeframe}'.")
+    currency = str(currency or "usd").strip().lower()
+    if currency not in {"usd", "native"}:
+        raise RuntimeError(f"Invalid Birdeye currency '{currency}'.")
+
+    def _to_unix(value: str) -> int:
+        text = str(value).strip()
+        if re.fullmatch(r"\\d+", text):
+            return int(text)
+        dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return int(dt.timestamp())
+
+    time_from = _to_unix(start)
+    time_to = _to_unix(end)
+    if time_to <= time_from:
+        raise RuntimeError("Invalid time range for Solana fetch (end <= start).")
+
+    query = urllib.parse.urlencode({
+        "address": mint,
+        "type": timeframe,
+        "currency": currency,
+        "time_from": str(time_from),
+        "time_to": str(time_to),
+    })
+    url = f"https://public-api.birdeye.so/defi/v3/ohlcv?{query}"
+    headers = {"X-API-KEY": api_key, "x-chain": "solana", "Accept": "application/json"}
+    req = urllib.request.Request(url, headers=headers, method="GET")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Birdeye HTTP error {exc.code}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Birdeye network error: {exc.reason}") from exc
+
+    if not isinstance(payload, dict) or not payload.get("success"):
+        raise RuntimeError(f"Birdeye returned failure payload: {payload}")
+    data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+    items = data.get("items", []) if isinstance(data.get("items"), list) else []
+    if not items:
+        raise RuntimeError(f"Birdeye returned 0 bars for {symbol} ({mint}).")
+
+    is_scaled = bool(data.get("is_scaled_ui_token", False))
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        o = item.get("scaled_o") if is_scaled and item.get("scaled_o") is not None else item.get("o")
+        h = item.get("scaled_h") if is_scaled and item.get("scaled_h") is not None else item.get("h")
+        l = item.get("scaled_l") if is_scaled and item.get("scaled_l") is not None else item.get("l")
+        c = item.get("scaled_c") if is_scaled and item.get("scaled_c") is not None else item.get("c")
+        v = item.get("scaled_v") if is_scaled and item.get("scaled_v") is not None else item.get("v")
+        ts = item.get("unix_time")
+        rows.append({"unix_time": ts, "open": o, "high": h, "low": l, "close": c, "volume": v, "v_usd": item.get("v_usd")})
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(pd.to_numeric(df.get("unix_time"), errors="coerce"), unit="s", utc=True).dt.tz_localize(None)
+    for col in ("open", "high", "low", "close", "volume", "v_usd"):
+        df[col] = pd.to_numeric(df.get(col), errors="coerce")
+    df = (
+        df[["date", "open", "high", "low", "close", "volume", "v_usd"]]
+        .dropna(subset=["date", "close"])
+        .drop_duplicates(subset=["date"])
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    if df.empty:
+        raise RuntimeError("Birdeye bars contained no parseable close prices.")
+    df["Open"] = df["open"]
+    df["High"] = df["high"]
+    df["Low"] = df["low"]
+    df["Close"] = df["close"]
+    df["Volume"] = df["volume"]
+    df["Adj Close"] = df["close"]
+    df["solana_mint"] = mint
     return df
 '''.strip()
 
@@ -221,19 +458,38 @@ self-contained Python script that:
 1. Loads the user's strategy files and data files from the CURRENT WORKING DIRECTORY.
 2. Runs the strategy and any machine-learning / signal logic it contains.
 3. Fetches benchmark buy-and-hold data for the same ticker and period using the
-   Alpaca Markets REST API (function provided below — copy it verbatim).
+   provider-appropriate API function(s) provided below (copy verbatim).
 4. Computes ALL required output metrics (see schema below).
 5. Prints the final JSON object to stdout as the very last thing.
    All other prints MUST use stderr.
 
 Constraints:
-- Only use: json, math, os, sys, pathlib, datetime, urllib, numpy, pandas, scipy,
-  sklearn, statsmodels. No other third-party imports. No yfinance.
+- You may import ANY Python package the strategy requires. If a package is not available,
+  install it at the top of the script using subprocess: e.g.
+      import subprocess, sys
+      subprocess.check_call([sys.executable, "-m", "pip", "install", "<package>"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  Do this before any other imports that may be missing.
 - If the strategy file defines a function, call it. If it is a script, adapt it.
+- NEVER require the user to upload price CSV files.
+- If a strategy uses nsepy, yfinance, pandas_datareader, AlphaVantage, or other
+  external market data clients, replace that logic with provider function bar fetching.
+- If local price files referenced by the strategy are missing, do not fail fast or
+  request user uploads by default; reconstruct equivalent price inputs from fetched bars.
+- ALWAYS call the selected benchmark function at least once to build canonical strategy price data.
+- Use fetched bars as the canonical internal dataset for strategy calculations.
+- Persist that canonical dataset to "__internal_price_data.csv" in the working directory
+  with at least date/open/high/low/close/volume columns.
+- After a successful fetch, print one exact marker to stderr:
+    ALPACA_FETCH_OK timeframe=<timeframe> rows=<row_count>
+    OR
+    SOLANA_FETCH_OK timeframe=<timeframe> rows=<row_count>
+- You may call the selected benchmark function for both strategy inputs and benchmark inputs.
 - The equity curve must be derived from the strategy's actual signals/positions.
 - Trades must be extracted or inferred from the position changes.
-- For the benchmark, COPY the _fetch_benchmark_alpaca function below VERBATIM into
-  your script and call it with inferred parameters:
+- Provider selection rules:
+    - Use Solana function when ticker looks like xStock (suffix "x"/"X") or is a Solana mint.
+    - Otherwise use Alpaca function.
+- For Alpaca benchmark call:
       bench_df = _fetch_benchmark_alpaca(
           ticker=ticker,
           start=backtest_start,
@@ -244,14 +500,22 @@ Constraints:
           limit=benchmark_limit,
           sort="asc",
       )
-  This function raises RuntimeError on any failure (missing credentials, network
-  error, no data). Do NOT catch or suppress these errors — let the script exit with
+- For Solana benchmark call:
+      bench_df = _fetch_benchmark_solana_xstocks(
+          ticker=ticker,
+          start=backtest_start,
+          end=backtest_end,
+          timeframe=benchmark_timeframe,
+          currency="usd",
+      )
+- Both functions raise RuntimeError on any failure (missing credentials, network
+  error, no data). Do NOT catch or suppress these errors â€” let the script exit with
   a non-zero code so the issue is surfaced clearly.
 - Infer benchmark API parameters from the strategy/data:
-    1) timeframe: derive from bar cadence if possible (examples: 1Min, 5Min, 15Min, 1Hour, 1Day)
-    2) adjustment: choose based on strategy/data assumptions (typically "all")
-    3) feed: prefer "sip", but choose "iex" if appropriate for the strategy context
-    4) limit: dynamic based on expected bar count (do not hardcode blindly)
+    1) timeframe: derive from bar cadence if possible
+    2) for Alpaca use values like 1Min/5Min/15Min/1Hour/1Day
+    3) for Solana use values like 1m/5m/15m/1H/4H/1D
+    4) prefer daily bars when cadence is unclear
 - If using intraday bars, compute annualization using an inferred bars-per-year factor
   consistent with the chosen timeframe (do not assume 252 daily bars in that case).
 - If cadence cannot be inferred confidently, default to timeframe="1Day" and print that
@@ -265,13 +529,20 @@ Constraints:
 ALPACA FUNCTION TO COPY VERBATIM:
 {alpaca_snippet}
 
+SOLANA FUNCTION TO COPY VERBATIM:
+{solana_snippet}
+
 {schema}
 
 CRITICAL: Output ONLY the Python script. No explanation, no markdown fences, no prose.
 Just raw Python code starting with imports.
 """
     .strip()
-    .format(alpaca_snippet=ALPACA_BENCHMARK_SNIPPET, schema=REQUIRED_OUTPUT_SCHEMA)
+    .format(
+        alpaca_snippet=ALPACA_BENCHMARK_SNIPPET,
+        solana_snippet=SOLANA_BENCHMARK_SNIPPET,
+        schema=REQUIRED_OUTPUT_SCHEMA,
+    )
 )
 
 # System prompt for the REVIEW phase (Phase 3).
@@ -291,16 +562,16 @@ Rules:
    -> feedback = concise description of the bug to fix in the next attempt
 
 3. If the user's strategy script itself is the problem (import error for a custom
-   library, references a file we don't have, fundamentally broken logic that cannot
-   be fixed by rewriting the runner):
+   library, unsupported ticker/no Alpaca data, fundamentally broken logic that cannot
+   be fixed by rewriting the runner even after Alpaca fallback):
    -> verdict = "user_action_required"
    -> message = clear, user-facing explanation of what they need to fix or provide
 
 Respond ONLY with a JSON object:
 {
   "verdict": "success" | "agent_fault" | "user_action_required",
-  "feedback": "...",   // only for agent_fault — what to fix
-  "message": "..."     // only for user_action_required — user-facing message
+  "feedback": "...",   // only for agent_fault â€” what to fix
+  "message": "..."     // only for user_action_required â€” user-facing message
 }
 """.strip()
 
@@ -337,7 +608,7 @@ class BacktestTermination:
 
 
 # ---------------------------------------------------------------------------
-# Helper — get Anthropic client
+# Helper â€” get Anthropic client
 # ---------------------------------------------------------------------------
 
 def _get_anthropic_client():
@@ -358,7 +629,7 @@ def _get_anthropic_client():
 
 
 # ---------------------------------------------------------------------------
-# Helper — file schema summary
+# Helper â€” file schema summary
 # ---------------------------------------------------------------------------
 
 def _file_schema_summary(filename: str, content: str, max_rows: int = 8) -> str:
@@ -371,7 +642,7 @@ def _file_schema_summary(filename: str, content: str, max_rows: int = 8) -> str:
     preview = "\n".join(preview_lines)
     total_rows = len(lines) - 1  # exclude header
     return (
-        f"# {filename} — {total_rows} data rows\n"
+        f"# {filename} â€” {total_rows} data rows\n"
         f"{preview}\n"
         f"{'...(truncated)' if len(lines) > max_rows + 1 else ''}"
     ).strip()
@@ -411,8 +682,17 @@ def _normalize_staged_files(files: list[tuple[str, str]], fallback_prefix: str) 
     return normalized
 
 
+def _is_solana_xstock_ticker(ticker: str) -> bool:
+    symbol = str(ticker or "").strip()
+    if not symbol:
+        return False
+    if symbol.upper().endswith("X"):
+        return True
+    return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", symbol))
+
+
 # ---------------------------------------------------------------------------
-# Helper — extract JSON from Claude response text
+# Helper â€” extract JSON from Claude response text
 # ---------------------------------------------------------------------------
 
 def _extract_json(text: str) -> dict | None:
@@ -441,7 +721,7 @@ def _extract_json(text: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Helper — extract Python script from Claude response
+# Helper â€” extract Python script from Claude response
 # ---------------------------------------------------------------------------
 
 def _extract_script(text: str) -> str:
@@ -460,7 +740,7 @@ def _extract_script(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helper — extract last JSON from stdout
+# Helper â€” extract last JSON from stdout
 # ---------------------------------------------------------------------------
 
 def _extract_stdout_json(stdout: str) -> dict | None:
@@ -511,10 +791,12 @@ def _phase_create(
 
     ticker = pitch_context.get("ticker", "UNKNOWN")
     name = pitch_context.get("name", "strategy")
+    data_source_hint = "solana_xstocks_birdeye" if _is_solana_xstock_ticker(ticker) else "alpaca_stocks"
 
     context_block = textwrap.dedent(f"""\
         Strategy name: {name}
         Ticker: {ticker}
+        Data source hint: {data_source_hint}
         Available files in working directory: {[f for f, _ in strategy_files + data_files]}
     """)
 
@@ -622,6 +904,7 @@ def _phase_review(
     stderr: str,
     returncode: int,
     script: str,
+    ticker: str,
 ) -> tuple[str, str, str]:
     """
     Ask Claude to validate the output.
@@ -638,6 +921,19 @@ def _phase_review(
         )
     else:
         failure_context = None
+
+    expected_marker = "SOLANA_FETCH_OK" if _is_solana_xstock_ticker(ticker) else "ALPACA_FETCH_OK"
+    if expected_marker not in (stderr or ""):
+        return (
+            "agent_fault",
+            (
+                "Runner did not confirm benchmark data fetch. "
+                "Ensure it calls the provider-appropriate benchmark fetch function, "
+                "writes __internal_price_data.csv, and prints "
+                f"{expected_marker} timeframe=<...> rows=<...> to stderr."
+            ),
+            "",
+        )
 
     parsed_output = _extract_stdout_json(stdout)
     missing_fields = REQUIRED_OUTPUT_FIELDS - set(parsed_output.keys()) if parsed_output else REQUIRED_OUTPUT_FIELDS
@@ -661,7 +957,7 @@ def _phase_review(
     raw_text = response.content[0].text
     result = _extract_json(raw_text)
     if not result:
-        # Claude responded with unparseable text — treat as agent fault
+        # Claude responded with unparseable text â€” treat as agent fault
         return "agent_fault", f"Review LLM returned unparseable response: {raw_text[:300]}", ""
 
     verdict = str(result.get("verdict", "agent_fault"))
@@ -687,7 +983,7 @@ def run_backtest_agent(
         strategy_files: List of (filename, file_content) for .py strategy files.
         data_files:     List of (filename, file_content) for .csv/.tsv data files.
         pitch_context:  Dict with at minimum "name" and "ticker".
-        max_attempts:   Number of CREATE→RUN→REVIEW cycles (default 3).
+        max_attempts:   Number of CREATEâ†’RUNâ†’REVIEW cycles (default 3).
 
     Returns:
         BacktestTermination with status, metrics, message, attempt_history.
@@ -702,7 +998,7 @@ def run_backtest_agent(
             attempt_count=0,
         )
     except ValueError:
-        # Misconfiguration (missing API key) — re-raise so the caller knows
+        # Misconfiguration (missing API key) â€” re-raise so the caller knows
         # this is an infrastructure problem, not a strategy problem.
         raise
 
@@ -783,6 +1079,7 @@ def run_backtest_agent(
                     stderr=stderr,
                     returncode=returncode,
                     script=script,
+                    ticker=str(pitch_context.get("ticker", "UNKNOWN")),
                 )
             except Exception as exc:
                 review_verdict = "agent_fault"
@@ -812,7 +1109,7 @@ def run_backtest_agent(
                 raw_metrics["name"] = pitch_context.get("name", "strategy")
                 raw_metrics["ticker"] = pitch_context.get("ticker", "UNKNOWN")
 
-                # Coerce and validate numeric types — treat NaN/Inf as agent fault
+                # Coerce and validate numeric types â€” treat NaN/Inf as agent fault
                 try:
                     metrics = _coerce_metric_types(raw_metrics)
                 except ValueError as exc:
@@ -844,7 +1141,7 @@ def run_backtest_agent(
                 )
 
             else:
-                # agent_fault — set up feedback for next attempt
+                # agent_fault â€” set up feedback for next attempt
                 prior_feedback = review_feedback
                 prior_script = script
                 prior_stdout = stdout
@@ -889,7 +1186,7 @@ def _coerce_metric_types(metrics: dict) -> dict:
                 raise ValueError(f"Metric '{key}' is not numeric: {result[key]!r}") from exc
             if math.isnan(v) or math.isinf(v):
                 raise ValueError(
-                    f"Metric '{key}' is {v!r} — backtest produced non-finite result. "
+                    f"Metric '{key}' is {v!r} â€” backtest produced non-finite result. "
                     "This is a bug in the generated script."
                 )
             result[key] = v
@@ -958,3 +1255,4 @@ if __name__ == "__main__":
         print("\nMetrics:")
         for k, v in sorted(result.metrics.items()):
             print(f"  {k}: {v}")
+

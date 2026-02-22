@@ -1,0 +1,135 @@
+{
+  "pitch_id": "pit_270675c5a5ba",
+  "status": "completed",
+  "overall_score": 0.0,
+  "allocation_usd": 0,
+  "decision": "needs_clarification",
+  "validation_outcome": "needs_clarification",
+  "user_facing_message": "I found issues that need clarification before final review.",
+  "validation_summary": "No CSV/TSV uploaded; unable to perform fabrication checks.",
+  "validation_questions": [],
+  "hard_reject_reasons": [
+    "Alpha -0.3336 <= 0",
+    "Sharpe ratio -0.85 <= 0",
+    "Profit factor 0.44 <= 1.0",
+    "Max drawdown -79.73% exceeds -50%"
+  ],
+  "agent_outputs": {
+    "data_fetcher": {
+      "agent": "data_fetcher",
+      "status": "ok",
+      "confidence": 1.0,
+      "summary": "No uploaded CSV/TSV files required CUA validation; price history is fetched internally for backtesting.",
+      "flags": [],
+      "artifacts": {
+        "validated_file_names": [],
+        "match_rate": 1.0,
+        "per_file": {}
+      },
+      "latency_ms": 0
+    },
+    "data_validator": {
+      "agent": "data_validator",
+      "status": "warn",
+      "confidence": 0.0,
+      "summary": "No dataset was uploaded or extracted for analysis. Without raw price/volume data, it is impossible to verify data integrity or detect fabrication.",
+      "flags": [
+        {
+          "code": "NO_DATA",
+          "message": "No CSV/TSV uploaded; unable to perform fabrication checks."
+        }
+      ],
+      "artifacts": {
+        "data_quality_score": 1.0,
+        "row_count": 0,
+        "symbol_count": 1,
+        "llm_artifacts": {
+          "verdict": "clean",
+          "questions": []
+        }
+      },
+      "latency_ms": 15760
+    },
+    "pipeline_auditor": {
+      "agent": "pipeline_auditor",
+      "status": "ok",
+      "confidence": 0.0,
+      "summary": "The submission does not contain any uploaded data or code artifacts to evaluate. Without the implementation details or backtest results, it is impossible to assess the strategy for methodology errors such as look-ahead bias, feature leakage, or overfitting. The scoring context suggests the backtest did not run successfully.",
+      "flags": [
+        {
+          "code": "METHOD_WARN",
+          "message": "Methodology is missing."
+        },
+        {
+          "code": "STRATEGY_SCORER_REQUIRED",
+          "message": "Backtest strategy scoring is required. CSV approximation scoring is disabled."
+        }
+      ],
+      "artifacts": {
+        "methodology_score": 0.0,
+        "llm_artifacts": {
+          "verdict": "clean",
+          "questions": []
+        }
+      },
+      "latency_ms": 12352
+    },
+    "scoring": {
+      "agent": "scoring",
+      "status": "ok",
+      "confidence": 0.3,
+      "summary": "Strategy-scorer output unavailable.",
+      "flags": [],
+      "artifacts": {
+        "source": "strategy_scorer_unavailable",
+        "sharpe": 0.0,
+        "max_drawdown": -1.0,
+        "risk_score": 1.0,
+        "time_to_return_days": null,
+        "one_shot_mode": false,
+        "one_shot_recommendation": null,
+        "one_shot_artifacts": null,
+        "backtest_attempt_count": 3,
+        "backtest_metrics": {
+          "backtest_start": "2023-01-26",
+          "backtest_end": "2026-02-20",
+          "cagr": -0.395245,
+          "total_return": -0.784919,
+          "volatility": 0.444336,
+          "sharpe_ratio": -0.851009,
+          "sortino_ratio": -0.999716,
+          "calmar_ratio": -0.495718,
+          "max_drawdown": -0.79732,
+          "max_drawdown_duration": 698,
+          "total_trades": 41,
+          "win_rate": 0.268293,
+          "avg_win": 0.082113,
+          "avg_loss": -0.068622,
+          "profit_factor": 0.438755,
+          "expectancy": -0.028181,
+          "benchmark_cagr": -0.66659,
+          "benchmark_max_drawdown": -0.975837,
+          "benchmark_total_return": -0.965131,
+          "alpha": -0.333625,
+          "information_ratio": -0.035874,
+          "excess_return": 0.271345,
+          "up_capture": 0.12222,
+          "down_capture": 0.179268,
+          "name": "pit_270675c5a5ba",
+          "ticker": "HERE"
+        },
+        "composite_score": 0.0,
+        "disqualified": true,
+        "disqualification_reasons": [
+          "Alpha -0.3336 <= 0",
+          "Sharpe ratio -0.85 <= 0",
+          "Profit factor 0.44 <= 1.0",
+          "Max drawdown -79.73% exceeds -50%"
+        ],
+        "component_scores": {}
+      },
+      "latency_ms": 0
+    }
+  },
+  "report_markdown": "# Pitch Result: `pit_270675c5a5ba`\n\n- Decision: **needs_clarification**\n- Validation outcome: **needs_clarification**\n- User message: **I found issues that need clarification before final review.**\n- Overall score: **0.0** / 100\n- Allocation (USD): **0**\n\n## Metrics\n- Sharpe: `0.0`\n- Max drawdown: `-1.0`\n- Risk score: `1.0`\n- Data quality score: `1.0`\n- Methodology score: `0.0`\n- Match rate: `1.0`\n- Scoring source: `strategy_scorer_unavailable`\n\n## Hard Reject Reasons\n- Alpha -0.3336 <= 0\n- Sharpe ratio -0.85 <= 0\n- Profit factor 0.44 <= 1.0\n- Max drawdown -79.73% exceeds -50%\n\n## Agent Flags\n- `data_fetcher`: no flags\n- `data_validator` `NO_DATA`: No CSV/TSV uploaded; unable to perform fabrication checks.\n- `pipeline_auditor` `METHOD_WARN`: Methodology is missing.\n- `pipeline_auditor` `STRATEGY_SCORER_REQUIRED`: Backtest strategy scoring is required. CSV approximation scoring is disabled."
+}

@@ -1,4 +1,4 @@
-{
+﻿{
   "pitch_id": "pit_3b3c0007049f",
   "created_at": "2026-02-21T14:28:35Z",
   "status": "draft",
@@ -6,7 +6,7 @@
   "time_horizon": null,
   "tickers": [],
   "source_urls": [],
-  "methodology_summary": "",
+  "supporting_notes": "",
   "submitter": {},
   "uploaded_files": []
 }
