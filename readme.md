@@ -2,7 +2,7 @@
 
 *Alpha can come from anyone.*
 
-High-level overview of the project. For implementation contracts and detailed rules, see [MVP_SPECmd](MVP_SPEC.md).
+High-level overview of the project. For implementation contracts and detailed rules, see [MVP_SPEC.md](MVP_SPEC.md).
 
 For a comprehensive discussion of the theoretical foundations, modelling assumptions, and experimental validation, see the [Thesis](https://openquant-thesis.tiiny.site).
 
