@@ -56,3 +56,23 @@ h1, h2, h3 {
     letter-spacing: -0.02em;
     font-weight: 700;
 }
+
+/* Improve contrast for tool/step metadata labels in dark mode
+   (e.g., "Using CUA Data Fetcher", "Used ..."). */
+.dark .step-name,
+.dark [class*="step-name"] {
+    color: #f2f2f2 !important;
+}
+
+.dark .text-muted-foreground,
+.dark [class*="text-muted"],
+.dark [class*="muted-foreground"] {
+    color: #d6d6d6 !important;
+}
+
+.dark [class*="badge"],
+.dark [data-testid*="badge"] {
+    background-color: #1f1f1f !important;
+    color: #f3f3f3 !important;
+    border-color: #3a3a3a !important;
+}

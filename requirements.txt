@@ -12,3 +12,4 @@ plotly>=5.0.0
 fastapi
 uvicorn[standard]
 pytest>=9.0.0
+paid-python

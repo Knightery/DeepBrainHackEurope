@@ -33,6 +33,7 @@ class PaidUsageTrackerTests(unittest.TestCase):
             api_key="paid-test-key",
             event_name="eva_by_anyquant",
             external_product_id="product_456",
+            use_sdk=False,
             enabled=True,
         )
 
@@ -63,7 +64,7 @@ class PaidUsageTrackerTests(unittest.TestCase):
             hdrs=None,
             fp=io.BytesIO(b'{"error":"bad key"}'),
         )
-        tracker = PaidUsageTracker(api_key="bad-key", enabled=True)
+        tracker = PaidUsageTracker(api_key="bad-key", use_sdk=False, enabled=True)
 
         ok = tracker.send_usage_record(external_customer_id="customer_123")
 

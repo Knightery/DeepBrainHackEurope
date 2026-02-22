@@ -31,6 +31,7 @@ from pitch_engine import (
 )
 from pitch_db import append_pitch_message, save_pitch_result, upsert_pitch_snapshot
 from paid_usage import PaidUsageTracker
+from app_ui import CuaLiveStreamer, send_equity_curve_chart
 
 try:
     from backtest_agent import run_backtest_agent as _run_backtest_agent
@@ -42,7 +43,7 @@ load_dotenv()
 
 import os as _os
 BACKTEST_TIMEOUT_SECONDS = int(_os.getenv("BACKTEST_TIMEOUT_SECONDS", "120"))
-_DEFAULT_PAID_EXTERNAL_PRODUCT_ID = "quant_pitch_evaluator"
+_DEFAULT_PAID_EXTERNAL_PRODUCT_ID = "prod_5hf5ZsgVqUK"
 _PAID_TRACKER = PaidUsageTracker.from_env(default_event_name="eva_by_anyquant")
 if _PAID_TRACKER.external_product_id is None:
     _PAID_TRACKER.external_product_id = _DEFAULT_PAID_EXTERNAL_PRODUCT_ID
@@ -921,43 +922,22 @@ async def _auto_validate_all_data_files_with_cua(draft: PitchDraft, reason: str)
 
     async def _validate_one(file_entry: UploadedFile) -> tuple[str, dict[str, Any]]:
         notes, source_urls_override, expected_format = _build_cua_context_for_file(draft, file_entry, reason)
-
-        # Per-file live log stream
-        _lines: list[str] = []
-        _log_msg: list[cl.Message | None] = [None]
-        _last_t: list[float] = [0.0]
-
-        async def _flush() -> None:
-            txt = "```\n" + "\n".join(_lines[-25:]) + "\n```"
-            if _log_msg[0] is None:
-                _log_msg[0] = cl.Message(
-                    content=txt, author=f"CUA Live — {file_entry.name}"
-                )
-                await _log_msg[0].send()
-            else:
-                _log_msg[0].content = txt
-                await _log_msg[0].update()
-
-        def _cb(line: str) -> None:
-            s = line.strip()
-            if not s:
-                return
-            _lines.append(s)
-            now = time.time()
-            if now - _last_t[0] > 0.7:
-                _last_t[0] = now
-                asyncio.run_coroutine_threadsafe(_flush(), _auto_cua_loop)
+        streamer = CuaLiveStreamer(
+            loop=_auto_cua_loop,
+            logger=_LOGGER,
+            author=f"CUA Live — {file_entry.name}",
+            error_tag=f"CUA live flush failed for {file_entry.name}",
+        )
 
         try:
+            await streamer.start()
             output = await cl.make_async(validate_data_with_cua)(
                 draft,
                 file_entry.name,
                 notes,
                 source_urls_override,
-                log_callback=_cb,
+                log_callback=streamer.callback,
             )
-            if _lines:
-                await _flush()
         except Exception as exc:
             output = {
                 "agent": "data_fetcher",
@@ -973,6 +953,8 @@ async def _auto_validate_all_data_files_with_cua(draft: PitchDraft, reason: str)
                 "artifacts": {"requested_file": file_entry.name, "match_rate": 0.0},
                 "latency_ms": 0,
             }
+        finally:
+            await streamer.stop()
         artifacts = output.get("artifacts", {})
         if not isinstance(artifacts, dict):
             artifacts = {}
@@ -1538,47 +1520,13 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         ]
         await cl.Message(content="\n".join(lines), author="Backtest Agent").send()
 
-        # --- Equity curve chart (optional — only present if backtest script emitted curves) ---
-        equity_curve = m.get("equity_curve")
-        benchmark_curve = m.get("benchmark_curve")
-        if equity_curve and isinstance(equity_curve, list) and len(equity_curve) > 1:
-            try:
-                import plotly.graph_objects as go  # noqa: PLC0415
-                from plotly.subplots import make_subplots  # noqa: PLC0415
-
-                dates_s = [pt[0] for pt in equity_curve]
-                vals_s = [pt[1] for pt in equity_curve]
-
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=dates_s, y=vals_s,
-                    name="Strategy",
-                    line=dict(color="#00e676", width=2),
-                    fill="tozeroy",
-                    fillcolor="rgba(0,230,118,0.07)",
-                ))
-
-                if benchmark_curve and isinstance(benchmark_curve, list) and len(benchmark_curve) > 1:
-                    dates_b = [pt[0] for pt in benchmark_curve]
-                    vals_b = [pt[1] for pt in benchmark_curve]
-                    fig.add_trace(go.Scatter(
-                        x=dates_b, y=vals_b,
-                        name="Benchmark (B&H)",
-                        line=dict(color="#9e9e9e", width=1.5, dash="dot"),
-                    ))
-
-                fig.update_layout(
-                    title="📈 Equity Curve (normalised, start = 1.0)",
-                    xaxis_title="Date",
-                    yaxis_title="Portfolio value",
-                    template="plotly_dark",
-                    height=380,
-                    margin=dict(l=40, r=20, t=50, b=40),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                )
-                await cl.Plotly(figure=fig, display="inline", size="large").send()
-            except Exception as _chart_exc:
-                _LOGGER.debug("Equity curve chart failed: %s", _chart_exc)
+        if m.get("equity_curve"):
+            chart_sent = await send_equity_curve_chart(m, logger=_LOGGER)
+            if not chart_sent:
+                await cl.Message(
+                    content="Backtest succeeded, but the equity curve chart could not be rendered.",
+                    author="Backtest Agent",
+                ).send()
 
     elif result.status == "user_action_required":
         await cl.Message(
@@ -1624,41 +1572,25 @@ async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None
         has_notes=bool(notes),
     )
 
-    # --- Live log streaming callback for CUA ---
-    _cua_loop = asyncio.get_running_loop()
-    _cua_log_lines: list[str] = []
-    _cua_log_msg: list[cl.Message | None] = [None]  # mutable container for nonlocal
-    _cua_last_update: list[float] = [0.0]
-
-    async def _flush_cua_log() -> None:
-        content = "```\n" + "\n".join(_cua_log_lines[-25:]) + "\n```"
-        if _cua_log_msg[0] is None:
-            _cua_log_msg[0] = cl.Message(content=content, author="CUA Live Feed")
-            await _cua_log_msg[0].send()
-        else:
-            _cua_log_msg[0].content = content
-            await _cua_log_msg[0].update()
-
-    def _cua_log_cb(line: str) -> None:
-        stripped = line.strip()
-        if not stripped:
-            return
-        _cua_log_lines.append(stripped)
-        now = time.time()
-        if now - _cua_last_update[0] > 0.7:
-            _cua_last_update[0] = now
-            asyncio.run_coroutine_threadsafe(_flush_cua_log(), _cua_loop)
+    cua_loop = asyncio.get_running_loop()
+    streamer = CuaLiveStreamer(
+        loop=cua_loop,
+        logger=_LOGGER,
+        author="CUA Live Feed",
+        error_tag="CUA live feed flush failed",
+    )
 
     async with cl.Step(name="CUA Data Fetcher", type="tool") as step:
         step.input = f"File: `{file_name}` | Sources: {source_urls} | Notes: {notes or '(none)'}"
         step.output = "Running browser automation via Docker..."
 
-        output = await cl.make_async(validate_data_with_cua)(
-            draft, file_name or "", notes or "", log_callback=_cua_log_cb
-        )
-        # Final flush
-        if _cua_log_lines:
-            await _flush_cua_log()
+        await streamer.start()
+        try:
+            output = await cl.make_async(validate_data_with_cua)(
+                draft, file_name or "", notes or "", log_callback=streamer.callback
+            )
+        finally:
+            await streamer.stop()
 
         _set_session_data_fetcher_output(output)
 
@@ -1787,9 +1719,9 @@ async def on_chat_start() -> None:
     horizon_res = await cl.AskActionMessage(
         content="**Step 2 of 2 — Time horizon**\n\nWhat is the expected holding period?",
         actions=[
-            cl.Action(name="days", payload={"value": "days"}, label="Days (intraday â€“ 1 week)"),
-            cl.Action(name="weeks", payload={"value": "weeks"}, label="Weeks (1 â€“ 8 weeks)"),
-            cl.Action(name="months", payload={"value": "months"}, label="Months (2 â€“ 12 months)"),
+            cl.Action(name="days", payload={"value": "days"}, label="Days (intraday — 1 week)"),
+            cl.Action(name="weeks", payload={"value": "weeks"}, label="Weeks (1 — 8 weeks)"),
+            cl.Action(name="months", payload={"value": "months"}, label="Months (2 — 12 months)"),
             cl.Action(name="years", payload={"value": "years"}, label="Years (1 year+)"),
         ],
         timeout=300,

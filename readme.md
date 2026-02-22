@@ -108,7 +108,7 @@ docker compose run --rm --service-ports data-fetcher ...
 
 Model selection:
 
-- Default is `claude-sonnet-4-5-20250929` (recommended for stronger web navigation reliability).
+- Default is `claude-sonnet-4-6` (recommended for stronger web navigation reliability).
 - For cheaper testing, set `ANTHROPIC_MODEL=claude-haiku-4-5-20251001`.
 - Tool version is auto-paired in `cua/data_fetcher.py`, or can be overridden with `CUA_TOOL_VERSION`.
 

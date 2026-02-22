@@ -1193,11 +1193,11 @@ def validate_data_with_cua(
     except ValueError:
         max_attempts = 3
 
-    timeout_raw = os.getenv("CUA_RUN_TIMEOUT_SECONDS", "360")
+    timeout_raw = os.getenv("CUA_RUN_TIMEOUT_SECONDS", "1200")
     try:
         run_timeout = max(60, int(timeout_raw))
     except ValueError:
-        run_timeout = 360
+        run_timeout = 1200
 
     source_list = "\n".join(f"- {url}" for url in selected_source_urls)
     reference_brief = _reference_file_brief(source_path, file_entry.mime_type)
@@ -1291,6 +1291,12 @@ def validate_data_with_cua(
                 if time.perf_counter() - _run_t0 > run_timeout:
                     proc.kill()
                     _timed_out = True
+                    break
+                # Normal idle period while container is still running or
+                # reader thread is draining buffered output: keep waiting.
+                if proc.poll() is None or _rt.is_alive():
+                    continue
+                # Process ended and reader drained all lines.
                 break
             if _ln is None:
                 break
@@ -2352,4 +2358,3 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
         agent_outputs=agent_outputs,
         report_markdown="\n".join(report_lines),
     )
-
