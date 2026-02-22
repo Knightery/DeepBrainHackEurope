@@ -62,7 +62,8 @@ cua/downloads/
 
 # Chainlit runtime
 .chainlit/
-.files/
+.files/*
+!.files/.gitkeep
 .tmp_chainlit_test/
 .tmp_wheels_311/
 .tmp_wheels_312/
