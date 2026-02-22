@@ -2,7 +2,7 @@
 
 ![OpenQuant](slide_cover.png)
 
-High-level overview of the project. For implementation contracts and detailed rules, see [MVP_SPEC.md](MVP_SPEC.md). For a comprehensive discussion of the theoretical foundations, modelling assumptions, and experimental validation, see the [Thesis](https://drive.google.com/file/d/1EI6PKHE6N8MoWOx-DSY8CaRdBHd87Zzt/view?usp=sharing).
+High-level overview of the project. For implementation contracts and detailed rules, see [MVP_SPEC.md](MVP_SPEC.md). For a comprehensive discussion of the theoretical foundations, modelling assumptions, and experimental validation, see the [7-Page Thesis](https://drive.google.com/file/d/1EI6PKHE6N8MoWOx-DSY8CaRdBHd87Zzt/view?usp=sharing).
 
 ---
 
