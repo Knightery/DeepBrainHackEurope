@@ -1017,7 +1017,10 @@ def _resolve_downloaded_host_paths(downloaded_files: list[str], excluded_filenam
         if filename.lower() in excluded:
             continue
         host_path = downloads_dir / filename
-        if host_path.exists() and host_path not in seen:
+        # Keep candidate paths even if host visibility lags briefly after
+        # container exit; downstream profiling tolerates missing files and this
+        # avoids false "no candidate files" mismatches.
+        if host_path not in seen:
             resolved.append(host_path)
             seen.add(host_path)
     return resolved
@@ -1279,6 +1282,7 @@ def validate_data_with_cua(
 
         _line_q: _queue.Queue = _queue.Queue()
         _stdout_lines: list[str] = []
+        _suppress_teardown_trace = False
 
         def _reader_thread(pipe: Any, q: _queue.Queue) -> None:
             try:
@@ -1308,6 +1312,17 @@ def validate_data_with_cua(
                 break
             if _ln is None:
                 break
+            # Suppress known asyncio teardown noise from the container process.
+            # This traceback is benign and can pollute live logs.
+            stripped_line = _ln.strip()
+            if stripped_line.startswith("Exception ignored in: <function BaseSubprocessTransport.__del__"):
+                _suppress_teardown_trace = True
+                continue
+            if _suppress_teardown_trace:
+                if "RuntimeError: Event loop is closed" in stripped_line:
+                    _suppress_teardown_trace = False
+                continue
+
             _stdout_lines.append(_ln)
             if log_callback is not None:
                 try:

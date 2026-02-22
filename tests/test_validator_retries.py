@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from pitch_engine import (
     PitchDraft,
     UploadedFile,
+    _resolve_downloaded_host_paths,
     _review_download_match_with_llm,
     _run_llm_validator,
     _run_llm_validators,
@@ -23,6 +24,16 @@ def _fake_response(text: str, parsed=None):
 
 
 class ValidatorRetryTests(unittest.TestCase):
+    def test_resolve_downloaded_host_paths_keeps_candidates_before_host_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads_dir = Path(tmp) / "downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            raw_downloads = ["/home/computeruse/Downloads/T10Y2Y(9).csv"]
+            with patch("pitch_engine._cua_downloads_dir", return_value=downloads_dir):
+                resolved = _resolve_downloaded_host_paths(raw_downloads, excluded_filenames=set())
+        self.assertEqual(1, len(resolved))
+        self.assertEqual("T10Y2Y(9).csv", resolved[0].name)
+
     def test_validate_data_with_cua_returns_on_matched_warn_attempt(self) -> None:
         class _FakeProc:
             def __init__(self) -> None:

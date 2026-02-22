@@ -102,6 +102,9 @@ description = "Alpha can come from anyone. Submit a quant strategy for multi-age
 # Custom CSS for OpenQuant branding
 custom_css = "/public/custom.css"
 
+# Custom JS for OpenQuant favicon
+custom_js = "/public/favicon.js"
+
 # Force a specific language for all users (e.g., "en-US", "he-IL", "fr-FR")
 # If not set, the browser's language will be used
 # language = "en-US"
