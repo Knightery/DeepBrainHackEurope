@@ -18,7 +18,7 @@ OpenQuant helps strong independent quants submit stock ideas and get evaluated w
 - **Runs a Claude backtest agent** to generate and execute a standardized runner from the user's strategy script, computing all scored metrics automatically.
 - Uses `strategy_scorer.py` as the canonical scoring engine for non-one-shot pitches.
 - Produces a final score, recommendation, and allocation amount.
-- Supports final human reviewer approval or rejection.
+- Exposes read-only pitch history/ranking views via dashboard/API for operations visibility.
 
 ## User experience (MVP)
 
@@ -57,6 +57,8 @@ OpenQuant helps strong independent quants submit stock ideas and get evaluated w
 - Interactive Chainlit app is live.
 - Local scoring and reporting are implemented.
 - Checklist-style readiness and mandatory gates are implemented.
+- FastAPI routes expose read-only pitch history and message logs (`/api/pitches*`), plus a lightweight dashboard (`/dashboard`).
+- Reviewer approve/reject workflow is not part of the current MVP surface.
 - Some advanced fetcher/auditor integrations remain MVP+ work.
 
 ## Key docs

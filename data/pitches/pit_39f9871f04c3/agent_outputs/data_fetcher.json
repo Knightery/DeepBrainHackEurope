@@ -1,0 +1,39 @@
+{
+  "agent": "data_fetcher",
+  "status": "fail",
+  "confidence": 0.2,
+  "summary": "CUA run completed but returned unparsable output.",
+  "flags": [
+    {
+      "code": "CUA_OUTPUT_PARSE_FAILED",
+      "message": "Could not parse JSON result from CUA output."
+    }
+  ],
+  "artifacts": {
+    "attempt": 3,
+    "return_code": 1,
+    "stdout_tail": "error during connect: in the default daemon configuration on Windows, the docker client must be run with elevated privileges to connect: Get \"http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.51/networks?filters=%7B%22name%22%3A%7B%22cua_default%22%3Atrue%7D%7D\": open //./pipe/docker_engine: The system cannot find the file specified.\n",
+    "stderr_tail": "",
+    "attempt_history": [
+      {
+        "attempt": 1,
+        "start_url": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y",
+        "status": "warn",
+        "match_review": {
+          "verdict": "match",
+          "confidence": 1.0,
+          "best_candidate": "T10Y2Y.csv",
+          "reason": "Candidate file contains identical dates and values to the reference. The column 'T10Y2Y' corresponds semantically and numerically to 'spread_pct'.",
+          "retry_guidance": "Find a different source download that better matches schema/entities/date range."
+        },
+        "downloaded_files": [
+          "/home/computeruse/Downloads/T10Y2Y.csv"
+        ],
+        "candidate_downloaded_files": [
+          "/home/computeruse/Downloads/T10Y2Y.csv"
+        ]
+      }
+    ]
+  },
+  "latency_ms": 275733
+}

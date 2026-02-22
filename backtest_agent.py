@@ -919,7 +919,7 @@ def _phase_review(
     stderr: str,
     returncode: int,
     script: str,
-    ticker: str,
+    ticker: str = "UNKNOWN",
 ) -> tuple[str, str, str]:
     """
     Ask Claude to validate the output.

@@ -1,4 +1,4 @@
-﻿# OpenQuant - MVP Spec (Detailed Overview)
+# OpenQuant - MVP Spec (Detailed Overview)
 
 This is the implementation contract for MVP behavior, data requirements, and service responsibilities.
 
@@ -18,12 +18,12 @@ Ship a working end-to-end system that:
 - Checklist-style onboarding and readiness gates.
 - Deterministic strategy-scorer-based scoring and allocation.
 - Parallel evaluator outputs with unified envelope.
-- Reviewer approve/reject action with persisted result.
+- Read-only dashboard/API views for pitch history and rankings.
 
 ### Out of scope (MVP)
 - Brokerage execution and real-money movement.
 - Production auth/RBAC and multi-tenant scaling.
-- Full backtesting platform.
+- Dedicated reviewer approve/reject workflow API.
 - Advanced anti-fraud ML systems.
 
 ## 3) User Intake Contract (Mandatory)
@@ -45,7 +45,6 @@ Notes:
 
 Pitch statuses:
 - `draft` -> `ready` -> `running` -> `needs_clarification|ready_for_final_review|rejected`
-- reviewer path: `ready_for_final_review` -> `approved|rejected`
 - failure path: `running` -> `failed`
 
 Rules:
@@ -347,21 +346,29 @@ Horizon multiplier:
 Final:
 - `allocation = min(20000, round_to_100(base * multiplier))`
 
-## 10) APIs (MVP shape)
+## 10) Runtime Interfaces (current MVP)
 
-Base path: `/v1`
+### Primary interaction surface
 
-- `POST /pitches`: create draft with metadata/files.
-- `GET /pitches/{pitch_id}`: fetch pitch + status.
-- `POST /pitches/{pitch_id}/clarifier/messages`: chat turn + missing fields.
-- `POST /pitches/{pitch_id}/evaluate`: trigger run (idempotent while running).
-- `GET /pitches/{pitch_id}/result`: fetch result when complete.
-- `POST /pitches/{pitch_id}/review`: approve/reject with note.
+Chainlit chat app mounted at `/app` with command-driven orchestration:
+- `/status`, `/checklist`
+- `/oneshot on|off|status`
+- `/evaluate`
+- `/backtest`
+- `/validate_data "file" "notes"`
+- `/reset`
 
-Clarifier response must expose:
-- `assistant_message`
-- `missing_fields`
-- `ready_for_evaluation`
+### Dashboard/API surface
+
+FastAPI read endpoints:
+- `GET /api/theme`
+- `GET /api/pitches`
+- `GET /api/pitches/{pitch_id}`
+- `GET /api/pitches/{pitch_id}/messages`
+
+Landing/dashboard routes:
+- `GET /home` (landing)
+- `GET /dashboard` (ranked pitch view)
 
 Validation loop behavior:
 - `/evaluate` runs both validation agents.
@@ -380,12 +387,12 @@ data/
       uploads/
       agent_outputs/
         data_fetcher.json
-        data_validator.json
-        pipeline_auditor.json
-        scoring.json
+        backtest_agent.json
       result.json
-      review.json
 ```
+
+Notes:
+- `data_validator`, `pipeline_auditor`, and `scoring` outputs are persisted inside `result.json` under `agent_outputs`.
 
 ## 12) Reliability and Security Baseline
 
@@ -403,7 +410,7 @@ MVP is complete when:
 3. Evaluators produce normalized output envelopes.
 4. Result includes score, allocation, decision, and report.
 5. Hard-reject rules consistently force zero allocation.
-6. Reviewer decision is stored and queryable.
+6. Pitch history and messages are queryable via `/api/pitches*`.
 
 ## 14) Build Priorities
 

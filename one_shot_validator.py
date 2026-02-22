@@ -127,7 +127,7 @@ def _parse_token_from_text(text: str, key: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _gemini_model() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-2.5-pro-preview-03-25")
+    return os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 
 ONE_SHOT_EXTRACTOR_PROMPT = """

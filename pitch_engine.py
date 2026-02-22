@@ -329,6 +329,10 @@ class PitchDraft:
         if incoming_urls:
             self.source_urls = sorted(set(self.source_urls + incoming_urls))
 
+        one_shot = data.get("one_shot_mode")
+        if isinstance(one_shot, bool):
+            self.one_shot_mode = one_shot
+
 
 def heuristic_update_from_user_text(draft: PitchDraft, text: str) -> None:
     urls = extract_urls(text)
@@ -545,7 +549,11 @@ def _detect_file_roles(
     raw = (getattr(response, "text", "") or "").strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
-    parsed = json.loads(raw)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # LLM returned non-JSON — treat all CSV/TSV files as strategy data (safe fallback).
+        return {"strategy_scripts": strategy_scripts, "data_files": csv_files, "benchmark_files": []}
     classifications: dict[str, str] = {
         item["name"]: item["role"]
         for item in parsed.get("files", [])
@@ -713,7 +721,7 @@ def _normalize_backtest_window(start_raw: str, end_raw: str) -> tuple[str | None
 
 
 def _inferred_window_from_horizon(time_horizon: str | None) -> tuple[str, str]:
-    now = pd.Timestamp.utcnow().floor("s")
+    now = pd.Timestamp.now("UTC").floor("s")
     horizon = (time_horizon or "").strip().lower()
     if horizon == "days":
         start = now - timedelta(days=30)
@@ -1455,7 +1463,9 @@ def validate_data_with_cua(
             "latency_ms": int((time.perf_counter() - started) * 1000),
         }
 
-        if status == "ok":
+        # A confirmed match is terminal for this run. Do not allow a later retry
+        # (which can fail for unrelated reasons) to overwrite a valid match.
+        if match_verdict == "match" and status_text != "fail":
             return result_payload
 
         retry_feedback = str(match_review.get("retry_guidance", "")).strip()
@@ -1650,7 +1660,7 @@ def _run_llm_validator(agent_name: str, system_prompt: str, payload: dict[str, A
             )
             raw_text = (getattr(response, "text", "") or "").strip()
             _validator_log(agent_name, "raw_response_begin")
-            print(raw_text)
+            _validator_log(agent_name, f"raw_response_length={len(raw_text)}")
             _validator_log(agent_name, "raw_response_end")
 
             parsed_any = getattr(response, "parsed", None)
@@ -1816,10 +1826,13 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                         "message": backtest_result.message,
                     })
                 elif backtest_result.status == "agent_fault":
-                    raise RuntimeError(
-                        f"Backtest agent failed after {backtest_result.attempt_count} attempt(s). "
-                        f"Message: {backtest_result.message}"
-                    )
+                    auditor_flags.append({
+                        "code": "BACKTEST_AGENT_FAULT",
+                        "message": (
+                            f"Backtest failed after {backtest_result.attempt_count} attempt(s): "
+                            f"{backtest_result.message}"
+                        ),
+                    })
         elif roles["strategy_scripts"]:
             auditor_flags.append(
                 {
@@ -1893,8 +1906,16 @@ def evaluate_pitch(draft: PitchDraft, data_fetcher_output: dict[str, Any] | None
                 }
             )
         else:
-            one_shot_result = evaluate_one_shot_strategy(draft=draft)
-            auditor_flags.extend(one_shot_result.flags)
+            try:
+                one_shot_result = evaluate_one_shot_strategy(draft=draft)
+                auditor_flags.extend(one_shot_result.flags)
+            except Exception as exc:
+                auditor_flags.append(
+                    {
+                        "code": "ONE_SHOT_VALIDATOR_ERROR",
+                        "message": f"One-shot validator failed: {exc.__class__.__name__}: {exc}",
+                    }
+                )
 
     close_series = pd.Series(dtype=float)
     row_count = 0

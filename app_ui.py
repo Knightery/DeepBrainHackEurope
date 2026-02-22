@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any
 
@@ -118,6 +119,7 @@ class CuaLiveStreamer:
         self._error_tag = error_tag
 
         self._lines: list[str] = []
+        self._lines_lock = threading.Lock()
         self._message: cl.Message | None = None
         self._last_update = 0.0
         self._last_activity = time.time()
@@ -128,7 +130,9 @@ class CuaLiveStreamer:
 
     async def _flush(self) -> None:
         async with self._flush_lock:
-            body = "\n".join(self._lines[-self._max_lines :]) if self._lines else self._wait_label
+            with self._lines_lock:
+                snapshot = list(self._lines[-self._max_lines :])
+            body = "\n".join(snapshot) if snapshot else self._wait_label
             idle_secs = int(max(0.0, time.time() - self._last_activity))
             elapsed_secs = int(max(0.0, time.time() - self._started))
             content = (
@@ -161,7 +165,9 @@ class CuaLiveStreamer:
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
-        if self._lines:
+        with self._lines_lock:
+            has_lines = bool(self._lines)
+        if has_lines:
             await self._flush()
 
     def callback(self, line: str) -> None:
@@ -169,7 +175,8 @@ class CuaLiveStreamer:
         if not stripped:
             return
 
-        self._lines.append(stripped)
+        with self._lines_lock:
+            self._lines.append(stripped)
         now = time.time()
         self._last_activity = now
         if now - self._last_update <= self._update_interval:

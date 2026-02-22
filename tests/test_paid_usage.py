@@ -1,23 +1,9 @@
 from __future__ import annotations
 
-import io
-import json
 import unittest
-import urllib.error
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from paid_usage import PaidUsageTracker
-
-
-class _FakeResponse:
-    def __init__(self, status: int = 202) -> None:
-        self.status = status
-
-    def __enter__(self) -> "_FakeResponse":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
 
 
 class PaidUsageTrackerTests(unittest.TestCase):
@@ -26,14 +12,24 @@ class PaidUsageTrackerTests(unittest.TestCase):
         tracker = PaidUsageTracker.from_env()
         self.assertFalse(tracker.enabled)
 
-    @patch("paid_usage.urllib.request.urlopen")
-    def test_send_usage_record_posts_expected_bulk_payload(self, mock_urlopen) -> None:
-        mock_urlopen.return_value = _FakeResponse(status=202)
+    @patch("paid_usage._PaidSignal")
+    @patch("paid_usage._ProductByExternalId")
+    @patch("paid_usage._CustomerByExternalId")
+    @patch("paid_usage._PaidClient")
+    def test_send_usage_record_uses_paid_sdk(
+        self,
+        mock_paid_client,
+        mock_customer,
+        mock_product,
+        mock_signal,
+    ) -> None:
+        client = MagicMock()
+        mock_paid_client.return_value = client
         tracker = PaidUsageTracker(
             api_key="paid-test-key",
             event_name="eva_by_anyquant",
             external_product_id="product_456",
-            use_sdk=False,
+            timeout_seconds=5,
             enabled=True,
         )
 
@@ -44,27 +40,25 @@ class PaidUsageTrackerTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
-        req = mock_urlopen.call_args.args[0]
-        body = json.loads(req.data.decode("utf-8"))
+        mock_paid_client.assert_called_once_with(token="paid-test-key", timeout=5.0)
+        mock_customer.assert_called_once_with(externalCustomerId="customer_123")
+        mock_product.assert_called_once_with(externalProductId="product_456")
+        mock_signal.assert_called_once()
+        client.signals.create_signals.assert_called_once()
 
-        self.assertEqual("https://api.paid.ai/v2/usage/bulk", req.full_url)
-        self.assertEqual("Bearer paid-test-key", req.headers.get("Authorization"))
-        self.assertEqual("application/json", req.headers.get("Content-type"))
-        self.assertEqual("eva_by_anyquant", body["usageRecords"][0]["event_name"])
-        self.assertEqual("customer_123", body["usageRecords"][0]["external_customer_id"])
-        self.assertEqual("product_456", body["usageRecords"][0]["external_product_id"])
-        self.assertEqual("idem-123", body["usageRecords"][0]["idempotency_key"])
-
-    @patch("paid_usage.urllib.request.urlopen")
-    def test_send_usage_record_handles_http_error(self, mock_urlopen) -> None:
-        mock_urlopen.side_effect = urllib.error.HTTPError(
-            url="https://api.paid.ai/v2/usage/bulk",
-            code=401,
-            msg="Unauthorized",
-            hdrs=None,
-            fp=io.BytesIO(b'{"error":"bad key"}'),
-        )
-        tracker = PaidUsageTracker(api_key="bad-key", use_sdk=False, enabled=True)
+    @patch("paid_usage._PaidSignal")
+    @patch("paid_usage._CustomerByExternalId")
+    @patch("paid_usage._PaidClient")
+    def test_send_usage_record_returns_false_on_sdk_error(
+        self,
+        mock_paid_client,
+        _mock_customer,
+        _mock_signal,
+    ) -> None:
+        client = MagicMock()
+        client.signals.create_signals.side_effect = RuntimeError("boom")
+        mock_paid_client.return_value = client
+        tracker = PaidUsageTracker(api_key="bad-key", max_retries=0, enabled=True)
 
         ok = tracker.send_usage_record(external_customer_id="customer_123")
 

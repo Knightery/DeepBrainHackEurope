@@ -39,6 +39,7 @@ From repo root:
 - `data/raw/noaa_weekly_hdd_us.csv`
 - `data/raw/eqt_prices_stooq_daily.csv`
 - `data/processed/feature_dataset.csv`
+- `data/processed/node2_forecast_history.csv`
 - `reports/correlation_metrics.json`
 - `reports/correlation_proof.md`
 - `reports/latest_trade_signal.json`
@@ -65,4 +66,3 @@ From repo root:
 
 - NOAA archive files are labeled preliminary in NOAA’s own documentation.
 - This is a tactical statistical strategy, not investment advice.
-

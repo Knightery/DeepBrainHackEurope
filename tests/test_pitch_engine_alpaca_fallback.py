@@ -264,6 +264,62 @@ class AlpacaFallbackTests(unittest.TestCase):
         assert isinstance(payload, dict)
         self.assertEqual(60, payload["data_summary"]["row_count"])
 
+    @patch("pitch_engine._run_llm_validators")
+    @patch.object(pitch_engine, "_ONE_SHOT_VALIDATOR_AVAILABLE", True)
+    @patch("pitch_engine.evaluate_one_shot_strategy")
+    @patch.object(pitch_engine, "_BACKTEST_AGENT_AVAILABLE", False)
+    def test_evaluate_pitch_handles_one_shot_validator_exception(
+        self,
+        mock_one_shot_eval: object,
+        mock_run_llm_validators: object,
+    ) -> None:
+        mock_one_shot_eval.side_effect = RuntimeError("bad one-shot output")
+        mock_run_llm_validators.return_value = {
+            "fabrication_detector": {
+                "status": "ok",
+                "confidence": 0.2,
+                "summary": "clean",
+                "flags": [],
+                "artifacts": {"verdict": "clean", "questions": []},
+                "latency_ms": 1,
+            },
+            "coding_errors_detector": {
+                "status": "ok",
+                "confidence": 0.2,
+                "summary": "clean",
+                "flags": [],
+                "artifacts": {"verdict": "clean", "questions": []},
+                "latency_ms": 1,
+            },
+        }
+
+        draft = PitchDraft(
+            pitch_id="pit_oneshot_fail",
+            created_at="2026-02-21T00:00:00Z",
+            thesis="Event-driven one shot",
+            time_horizon="weeks",
+            tickers=["AAPL"],
+            one_shot_mode=True,
+            uploaded_files=[],
+        )
+
+        result = evaluate_pitch(
+            draft=draft,
+            data_fetcher_output={
+                "status": "ok",
+                "summary": "",
+                "confidence": 1.0,
+                "flags": [],
+                "artifacts": {"match_rate": 1.0},
+                "latency_ms": 0,
+            },
+        )
+
+        pipeline_auditor = result.agent_outputs.get("pipeline_auditor", {})
+        flags = pipeline_auditor.get("flags", []) if isinstance(pipeline_auditor, dict) else []
+        codes = [flag.get("code") for flag in flags if isinstance(flag, dict)]
+        self.assertIn("ONE_SHOT_VALIDATOR_ERROR", codes)
+
 
 if __name__ == "__main__":
     unittest.main()
