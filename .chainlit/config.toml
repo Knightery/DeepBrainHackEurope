@@ -92,9 +92,15 @@ reaction_on_message_received = false
 
 [UI]
 # Name of the assistant.
-name = "Quant Pitch Evaluator"
+name = "OpenQuant"
 
 default_theme = "dark"
+
+# Description of the app used for HTML meta tags.
+description = "Alpha can come from anyone. Submit a quant strategy for multi-agent evaluation."
+
+# Custom CSS for OpenQuant branding
+custom_css = "/public/custom.css"
 
 # Force a specific language for all users (e.g., "en-US", "he-IL", "fr-FR")
 # If not set, the browser's language will be used
@@ -114,7 +120,7 @@ layout = "wide"
 confirm_new_chat = true
 
 # Description of the assistant. This is used for HTML tags.
-# description = ""
+# description = ""  # set above in the [UI] section
 
 # Chain of Thought (CoT) display mode. Can be "hidden", "tool_call" or "full".
 cot = "full"

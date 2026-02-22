@@ -1,4 +1,4 @@
-﻿# Quant Pitch Evaluator - MVP Spec (Detailed Overview)
+﻿# OpenQuant - MVP Spec (Detailed Overview)
 
 This is the implementation contract for MVP behavior, data requirements, and service responsibilities.
 

@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pitch_db import get_pitch, get_pitch_messages, init_db, list_pitches
 
-app = FastAPI(title="DeepBrain")
+app = FastAPI(title="OpenQuant")
 
 ROOT_DIR = Path(__file__).parent
 HOME_DIR = ROOT_DIR / "home"
@@ -55,7 +55,10 @@ def _dashboard_html(theme: dict[str, Any]) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Anyquant Dashboard</title>
+  <title>OpenQuant Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {{
       --bg: {background};
@@ -69,7 +72,8 @@ def _dashboard_html(theme: dict[str, Any]) -> str:
     body {{
       margin: 0; padding: 24px;
       background: var(--bg); color: var(--fg);
-      font-family: Inter, Segoe UI, Arial, sans-serif;
+      font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
     }}
     h1 {{ margin: 0 0 16px; font-size: 24px; }}
     .layout {{ display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }}
@@ -97,7 +101,7 @@ def _dashboard_html(theme: dict[str, Any]) -> str:
 </head>
 <body>
   <div class="toolbar">
-    <h1>Anyquant Pitch Dashboard</h1>
+    <h1>OpenQuant Pitch Dashboard</h1>
     <div>
       <a href="/home" class="btn">Landing</a>
       <a href="/app" class="btn">Open App</a>

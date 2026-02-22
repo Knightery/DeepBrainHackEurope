@@ -1,10 +1,12 @@
-# Quant Pitch Evaluator
+# OpenQuant
+
+*Alpha can come from anyone.*
 
 High-level overview of the project. For implementation contracts and detailed rules, see [MVP_SPEC.md](MVP_SPEC.md).
 
 ## Mission
 
-Quant Pitch Evaluator helps strong independent quants submit stock ideas and get evaluated with a transparent, structured process that can lead to capital allocation.
+OpenQuant helps strong independent quants submit stock ideas and get evaluated with a transparent, structured process that can lead to capital allocation.
 
 ## What the product does
 

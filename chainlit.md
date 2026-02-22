@@ -1,38 +1,46 @@
-# Quant Pitch Evaluator
+# OpenQuant
+
+*Alpha can come from anyone.*
 
 Submit a quantitative trading strategy for structured, multi-agent evaluation.
 
-## Required Fields
+---
 
-- **Thesis** -- what is mispriced and why
-- **Time horizon** -- `days`, `weeks`, `months`, or `years`
-- **Stock tickers** -- e.g. `AAPL, MSFT`
-- **Source URLs** -- provenance links for uploaded supporting CSV/TSV data files
-- **Strategy files** -- upload your `.py` or `.ipynb` strategy script
+## What you need
 
-Price data uploads are not required for notebook/script backtests. The backtest agent fetches market prices internally via Alpaca.
+- **Thesis** — what is mispriced and why
+- **Time horizon** — `days`, `weeks`, `months`, or `years`
+- **Tickers** — e.g. `AAPL, MSFT`
+- **Strategy file** — upload your `.py` or `.ipynb` strategy script
+- **Source URLs** *(only required when uploading supporting CSV/TSV data)*
+
+Price data is fetched internally via Alpaca — no OHLCV uploads needed.
+
+---
 
 ## Commands
 
-- `/status` -- show pitch completeness
-- `/checklist` -- show onboarding checklist
-- `/evaluate` -- run full validation and scoring pipeline (also used to re-run after clarifications)
-- `/backtest` -- run Claude backtest agent on uploaded `.py` or `.ipynb` strategy
-- `/validate_data "file" "notes"` -- run CUA browser validation against source URLs
-- `/reset` -- start a new pitch
-- `/help` -- show commands
+| Command | Description |
+|---|---|
+| `/evaluate` | Run the full validation & scoring pipeline |
+| `/backtest` | Run the backtest agent on your uploaded strategy |
+| `/validate_data "file" "notes"` | CUA browser validation against source URLs |
+| `/status` | Show pitch completeness |
+| `/checklist` | Show onboarding checklist |
+| `/reset` | Start a new pitch |
+| `/help` | Show all commands |
 
-## Pipeline Agents
+---
 
-Each evaluation runs these agents (visible as expandable steps in the chat):
+## Evaluation pipeline
 
-1. **Clarifier Agent** -- parses your natural-language pitch into structured fields
-2. **Backtest Agent** -- generates and executes a standardised backtest runner for `.py` or `.ipynb` strategies
-3. **Fabrication Detector** -- checks uploaded data for manipulation or fabrication
-4. **Pipeline Auditor** -- reviews methodology for look-ahead bias, leakage, overfitting
-5. **CUA Data Fetcher** -- validates uploaded files against source URLs via browser automation
-6. **Scoring Engine** -- computes composite score (0-100) and capital allocation (USD)
+Each run executes these agents in sequence (expandable in chat):
 
-Scoring for non-one-shot pitches is driven by `strategy_scorer.py` output from the backtest agent.
+1. **Clarifier** — parses your pitch into structured fields
+2. **Backtest Agent** — generates and executes a standardised backtest runner
+3. **Fabrication Detector** — checks uploaded data for manipulation
+4. **Pipeline Auditor** — reviews for look-ahead bias, leakage, and overfitting
+5. **CUA Data Fetcher** — validates files against source URLs via browser automation
+6. **Scoring Engine** — computes a composite score (0–100) and capital allocation (USD)
 
-Upload files using the attachment button in the chat input.
+Use the attachment button to upload strategy files or supporting data.
