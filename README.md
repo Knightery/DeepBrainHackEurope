@@ -49,8 +49,8 @@ flowchart LR
     D -- No --> F[Fabrication Detector\n+ Pipeline Auditor\n+ CUA Validator]
     F --> G[Backtest agent\nruns standardized runner]
     G --> H{Signal\nfabricated?}
-    H -- Yes --> I[❌ Goodbye.]
-    H -- No --> J[✅ Score + Report\n+ Allocation]
+    H -- Yes --> I[Goodbye.]
+    H -- No --> J[Score + Report\n+ Allocation]
     E --> J
 ```
 
@@ -159,7 +159,7 @@ CUA fetch behavior:
 - After each CUA run, the main agent performs an LLM match review between reference and downloaded candidates.
 - If mismatch is detected, the system automatically re-runs CUA with corrective guidance (configurable by `CUA_MAX_ATTEMPTS`, default `3`).
 
-> ⚠️ `docker run build` is not a valid build command. Use `docker compose build` (or `docker build`).
+> `docker run build` is not a valid build command. Use `docker compose build` (or `docker build`).
 
 ---
 
