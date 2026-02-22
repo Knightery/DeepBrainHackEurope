@@ -4,7 +4,7 @@
 
 High-level overview of the project. For implementation contracts and detailed rules, see [MVP_SPECmd](MVP_SPEC.md).
 
-See the [Thesis][https://openquant-thesis.tiiny.site]
+For a comprehensive discussion of the theoretical foundations, modelling assumptions, and experimental validation, see the [Thesis](https://openquant-thesis.tiiny.site).
 
 ## Mission
 
