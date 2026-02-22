@@ -1,0 +1,18 @@
+{
+  "generated_utc": "2026-02-22T07:43:08.787396+00:00",
+  "source_urls": {
+    "eia_wngsr_latest": "https://ir.eia.gov/ngs/wngsr.csv",
+    "eia_ngshistory": "https://ir.eia.gov/ngs/ngshistory.xls",
+    "noaa_weekly_hdd_archive": "https://ftp.cpc.ncep.noaa.gov/htdocs/products/analysis_monitoring/cdus/degree_days/archives/Heating%20degree%20Days/weekly%20states/",
+    "eqt_prices_stooq": "https://stooq.com/q/d/l/?s=eqt.us&i=d"
+  },
+  "files": {
+    "eia_wngsr_latest": "C:\\Users\\nyter\\Downloads\\HackEurope\\eqt_one_shot_eia_noaa\\data\\raw\\eia_wngsr_latest.csv",
+    "eia_ngshistory": "C:\\Users\\nyter\\Downloads\\HackEurope\\eqt_one_shot_eia_noaa\\data\\raw\\eia_ngshistory.xls",
+    "eqt_prices": "C:\\Users\\nyter\\Downloads\\HackEurope\\eqt_one_shot_eia_noaa\\data\\raw\\eqt_prices_stooq_daily.csv",
+    "noaa_weekly_hdd_us": "C:\\Users\\nyter\\Downloads\\HackEurope\\eqt_one_shot_eia_noaa\\data\\raw\\noaa_weekly_hdd_us.csv"
+  },
+  "rows": {
+    "noaa_weekly_hdd_us": 840
+  }
+}

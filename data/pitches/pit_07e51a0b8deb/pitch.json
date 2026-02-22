@@ -1,0 +1,173 @@
+{
+  "pitch_id": "pit_07e51a0b8deb",
+  "created_at": "2026-02-22T09:00:28Z",
+  "status": "ready",
+  "thesis": "Tactical mean-reversion strategy on EQT using EIA natural gas storage surprises and NOAA heating degree-day deviations. Signal is a composite z-score of storage and warmth surprises. Short EQT on high surplus/warmth, Long on deficit/cold. Holding period ~10 days.",
+  "time_horizon": "days",
+  "tickers": [
+    "EQT"
+  ],
+  "source_urls": [
+    "https://ftp.cpc.ncep.noaa.gov/htdocs/products/analysis_monitoring/cdus/degree_days/archives/Heating%20degree%20Days/weekly%20states/",
+    "https://ir.eia.gov/ngs/ngshistory.xls",
+    "https://ir.eia.gov/ngs/wngsr.csv",
+    "https://stooq.com/q/d/l/?s=eqt.us&i=d"
+  ],
+  "supporting_notes": "",
+  "one_shot_mode": true,
+  "submitter": {},
+  "uploaded_files": [
+    {
+      "file_id": "fil_e0792771180d",
+      "name": "feature_dataset.csv",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\feature_dataset.csv",
+      "mime_type": "text/csv",
+      "size_bytes": 161144,
+      "sha256": "737350d3e07487f092e7ca004473cc959f17304fe841f0f882a3ebab6a86820e"
+    },
+    {
+      "file_id": "fil_09f0d72f5184",
+      "name": "node2_forecast_history.csv",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\node2_forecast_history.csv",
+      "mime_type": "text/csv",
+      "size_bytes": 4405,
+      "sha256": "272f0d1fa9832317042c0f437cde91570906781722ab6a16c5c0abfaa841c6e7"
+    },
+    {
+      "file_id": "fil_93573462dbb9",
+      "name": "download_manifest.json",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\download_manifest.json",
+      "mime_type": "application/json",
+      "size_bytes": 1008,
+      "sha256": "54199eb718bb454134af862729d92c010d7bd5b3f8369eb2672f6bdb51d867d5"
+    },
+    {
+      "file_id": "fil_bc83f12cbd11",
+      "name": "eia_ngshistory.xls",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\eia_ngshistory.xls",
+      "mime_type": "application/vnd.ms-excel",
+      "size_bytes": 690688,
+      "sha256": "5b1010e02ea49e7ebba2561d2324d1bade6d22c809fb2eed816e7f7e3e7a45b7"
+    },
+    {
+      "file_id": "fil_01c393feaf92",
+      "name": "eia_wngsr_latest.csv",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\eia_wngsr_latest.csv",
+      "mime_type": "text/csv",
+      "size_bytes": 1481,
+      "sha256": "d3109af8d7ada8963a69cd741fa7c6556255f841a96ee9319108a4e58d988a8b"
+    },
+    {
+      "file_id": "fil_0f93f95cd093",
+      "name": "eqt_prices_stooq_daily.csv",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\eqt_prices_stooq_daily.csv",
+      "mime_type": "text/csv",
+      "size_bytes": 301222,
+      "sha256": "d4888f1bca17f316a1e4f656257d037bf3a84f54593d5634ab3e5761b4bf4751"
+    },
+    {
+      "file_id": "fil_7a2d99e36422",
+      "name": "noaa_weekly_hdd_us.csv",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\noaa_weekly_hdd_us.csv",
+      "mime_type": "text/csv",
+      "size_bytes": 171901,
+      "sha256": "7d06bcf03b6e2e601f91df4e37f45f9705c990fa0bcf0789f9ccdd5a786d745d"
+    },
+    {
+      "file_id": "fil_3a27a8ff5c9f",
+      "name": "README.md",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\README.md",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 2218,
+      "sha256": "814f6dbd8385fd425d76a44ef566208c769cf046fb1e83cf908969c536f2c0cb"
+    },
+    {
+      "file_id": "fil_760d038f07f8",
+      "name": "correlation_metrics.json",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\correlation_metrics.json",
+      "mime_type": "application/json",
+      "size_bytes": 781,
+      "sha256": "7fd889a798a5f07757de86c171859a9be7107d70fb04d93cdecda1618e8213b0"
+    },
+    {
+      "file_id": "fil_f9dc8555f569",
+      "name": "correlation_proof.md",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\correlation_proof.md",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 1802,
+      "sha256": "c8903bc01fe1bdcce0be56a38f8bcc1b4fd1c29011b9f206a18f71b7c822b674"
+    },
+    {
+      "file_id": "fil_364cfdcd548c",
+      "name": "latest_trade_signal.json",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\latest_trade_signal.json",
+      "mime_type": "application/json",
+      "size_bytes": 536,
+      "sha256": "17c2fce1d41aa0734c567226d15d98703ab2662ffc9336e5c6dfa38efc8ff84a"
+    },
+    {
+      "file_id": "fil_dc80b813204a",
+      "name": "analyze_correlation.py",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\analyze_correlation.py",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 5147,
+      "sha256": "4e319bd0ad852555bab873aff1af2daaf8ec8d932e692af4533ba866f381cd55"
+    },
+    {
+      "file_id": "fil_7a11c86ec21a",
+      "name": "download_data.py",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\download_data.py",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 1300,
+      "sha256": "0d4158141fe29f2f2454846bd1bd8e30c3bf66b2f756b1e5cacc37715ad41420"
+    },
+    {
+      "file_id": "fil_e202ca7d163f",
+      "name": "lib.py",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\lib.py",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 14347,
+      "sha256": "e52f4c883dfe06f89833c8a779673ea6fe27931fcf72d7b79042f36396710eb7"
+    },
+    {
+      "file_id": "fil_67a6461d407c",
+      "name": "trade_signal.py",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\trade_signal.py",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 3471,
+      "sha256": "2d6e3c40020f0e9b081d0f69c321b4966d1f037a2da405204e3f1e8c0fc3d877"
+    },
+    {
+      "file_id": "fil_3f3b5b45485f",
+      "name": "analyze_correlation.cpython-312.pyc",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\analyze_correlation.cpython-312.pyc",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 7120,
+      "sha256": "2d3320a701fb0071fcef9fc1838a3e1e27f8e823bb3cc5d7a7a575ba1e59dbee"
+    },
+    {
+      "file_id": "fil_f7d12c5fc469",
+      "name": "download_data.cpython-312.pyc",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\download_data.cpython-312.pyc",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 2013,
+      "sha256": "bdc9ce890a0931ea6d602a326e0ed8936ac36d57e7b9aaecfb30c9d71ce87493"
+    },
+    {
+      "file_id": "fil_d32196d76b85",
+      "name": "lib.cpython-312.pyc",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\lib.cpython-312.pyc",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 21191,
+      "sha256": "94a3a8051f56d57753c87d9d6505fd9d98a9cbf6fffb84f534b1c465863f31f4"
+    },
+    {
+      "file_id": "fil_b35cd18aa1a0",
+      "name": "trade_signal.cpython-312.pyc",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_07e51a0b8deb\\uploads\\trade_signal.cpython-312.pyc",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 5457,
+      "sha256": "c3b00ba7f57424447a5d6e4aeca8b63e3f95ee3dd99e5b9ff305ea3d98996172"
+    }
+  ]
+}

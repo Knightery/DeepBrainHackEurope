@@ -1,0 +1,34 @@
+{
+  "pitch_id": "pit_116d654a7f90",
+  "created_at": "2026-02-22T08:34:50Z",
+  "status": "running",
+  "thesis": "Long SPY equity strategy using a 200-day moving average trend filter and a 10Y-2Y Treasury yield spread regime filter to avoid recessions.",
+  "time_horizon": "years",
+  "tickers": [
+    "SPY"
+  ],
+  "source_urls": [
+    "https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y"
+  ],
+  "supporting_notes": "",
+  "one_shot_mode": false,
+  "submitter": {},
+  "uploaded_files": [
+    {
+      "file_id": "fil_d08c3faa011c",
+      "name": "yield_curve_momentum.py",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_116d654a7f90\\uploads\\yield_curve_momentum.py",
+      "mime_type": "text/x-python",
+      "size_bytes": 12132,
+      "sha256": "e405325810a569498c78813e2f870a4b692d5095e0aa216b9488aed5f51f07c3"
+    },
+    {
+      "file_id": "fil_be2c2d1937dc",
+      "name": "T10Y2Y_spread.csv",
+      "path": "C:\\Users\\nyter\\Downloads\\HackEurope\\data\\pitches\\pit_116d654a7f90\\uploads\\T10Y2Y_spread.csv",
+      "mime_type": "text/csv",
+      "size_bytes": 212128,
+      "sha256": "d60ed6167b1aa4bd3c30e8b0c9254ee94d4cc0eae5b643ca12f877dc9208fb11"
+    }
+  ]
+}

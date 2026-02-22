@@ -39,6 +39,12 @@ try:
 except ImportError:
     _BACKTEST_AVAILABLE = False
 
+try:
+    from strategy_scorer import score_strategy as _score_strategy, validate_and_load as _validate_and_load_strategy
+    _STRATEGY_SCORER_AVAILABLE = True
+except ImportError:
+    _STRATEGY_SCORER_AVAILABLE = False
+
 load_dotenv()
 
 import os as _os
@@ -107,6 +113,7 @@ Optional commands:
 - `/oneshot on|off|status` explicitly toggle one-shot validation mode
 - `/evaluate` run validation and scoring
 - `/backtest` run Claude backtest agent on uploaded strategy script (.py or .ipynb)
+- `/score-strategy` run backtest + force strategy_scorer output now
 - `/validate_data "file_to_validate" "notes"` run CUA data-source validation for one uploaded file
 - `/reset` start a new pitch
 - `/help` show commands
@@ -186,6 +193,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -254,6 +271,60 @@ def _session_data_fetcher_output() -> dict[str, Any] | None:
 
 def _set_session_data_fetcher_output(output: dict[str, Any] | None) -> None:
     cl.user_session.set("data_fetcher_output", output)
+
+
+def _current_upload_sha_map(draft: PitchDraft) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for entry in draft.uploaded_files:
+        name = (entry.name or "").strip()
+        if not name:
+            continue
+        mapping[name] = str(entry.sha256 or "").strip()
+    return mapping
+
+
+def _per_file_cua_cache_from_output(output: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(output, dict):
+        return {}
+    artifacts = output.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return {}
+
+    per_file = artifacts.get("per_file")
+    if isinstance(per_file, dict):
+        return {
+            str(file_name): payload
+            for file_name, payload in per_file.items()
+            if isinstance(file_name, str) and isinstance(payload, dict)
+        }
+
+    requested_file = artifacts.get("requested_file")
+    if isinstance(requested_file, str) and requested_file.strip():
+        return {requested_file.strip(): output}
+    return {}
+
+
+def _load_cached_per_file_cua_outputs(draft: PitchDraft) -> dict[str, dict[str, Any]]:
+    upload_sha = _current_upload_sha_map(draft)
+    candidates: dict[str, dict[str, Any]] = {}
+
+    candidates.update(_per_file_cua_cache_from_output(_session_data_fetcher_output()))
+
+    disk_path = _pitch_dir(draft.pitch_id) / "agent_outputs" / "data_fetcher.json"
+    for file_name, payload in _per_file_cua_cache_from_output(_read_json(disk_path)).items():
+        candidates.setdefault(file_name, payload)
+
+    valid: dict[str, dict[str, Any]] = {}
+    for file_name, payload in candidates.items():
+        expected_sha = upload_sha.get(file_name, "")
+        if not expected_sha:
+            continue
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        cached_sha = str(artifacts.get("validated_file_sha256", "")).strip()
+        if not cached_sha or cached_sha != expected_sha:
+            continue
+        valid[file_name] = payload
+    return valid
 
 
 def _non_empty_str(value: Any) -> str | None:
@@ -836,6 +907,26 @@ def _build_cua_context_for_file(draft: PitchDraft, file_entry: UploadedFile, rea
     return "\n".join(note_parts), scoped_urls, expected_format
 
 
+CUA_NON_BLOCKING_FLAG_CODES = {
+    "BASH_FALLBACK_USED",
+    "NO_GET_PAGE_TEXT",
+}
+
+
+def _filter_cua_flags(raw_flags: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_flags, list):
+        return []
+    filtered: list[dict[str, Any]] = []
+    for raw in raw_flags:
+        if not isinstance(raw, dict):
+            continue
+        code = str(raw.get("code", "")).strip().upper()
+        if code in CUA_NON_BLOCKING_FLAG_CODES:
+            continue
+        filtered.append(raw)
+    return filtered
+
+
 def _merge_cua_outputs(per_file_outputs: dict[str, dict[str, Any]]) -> dict[str, Any]:
     if not per_file_outputs:
         return {
@@ -858,6 +949,7 @@ def _merge_cua_outputs(per_file_outputs: dict[str, dict[str, Any]]) -> dict[str,
         total_latency += int(output.get("latency_ms", 0) or 0)
         confidence_sum += float(output.get("confidence", 0.0) or 0.0)
         file_status = str(output.get("status", "warn")).lower()
+        effective_file_status = file_status
 
         artifacts = output.get("artifacts", {})
         if isinstance(artifacts, dict):
@@ -865,19 +957,19 @@ def _merge_cua_outputs(per_file_outputs: dict[str, dict[str, Any]]) -> dict[str,
             if isinstance(match, (int, float)):
                 match_rates.append(float(match))
 
-        raw_flags = output.get("flags", [])
-        if isinstance(raw_flags, list):
-            for raw in raw_flags:
-                if not isinstance(raw, dict):
-                    continue
-                merged_flags.append(
-                    {
-                        "code": str(raw.get("code", "CUA_FLAG")).upper(),
-                        "message": f"[{file_name}] {str(raw.get('message', '')).strip()}",
-                    }
-                )
+        effective_flags = _filter_cua_flags(output.get("flags", []))
+        for raw in effective_flags:
+            merged_flags.append(
+                {
+                    "code": str(raw.get("code", "CUA_FLAG")).upper(),
+                    "message": f"[{file_name}] {str(raw.get('message', '')).strip()}",
+                }
+            )
 
-        if file_status != "ok":
+        if file_status == "warn" and not effective_flags:
+            effective_file_status = "ok"
+
+        if effective_file_status != "ok":
             failed_files.append(file_name)
 
     total = len(per_file_outputs)
@@ -909,14 +1001,29 @@ async def _auto_validate_all_data_files_with_cua(draft: PitchDraft, reason: str)
     files = _files_requiring_cua(draft)
     if not files:
         return _merge_cua_outputs({})
+    cached_per_file = _load_cached_per_file_cua_outputs(draft)
+    outputs: dict[str, dict[str, Any]] = {}
+    files_to_validate: list[UploadedFile] = []
+    for file_entry in files:
+        cached = cached_per_file.get(file_entry.name)
+        if cached is not None:
+            outputs[file_entry.name] = cached
+        else:
+            files_to_validate.append(file_entry)
 
-    await cl.Message(
-        content=(
-            f"Running mandatory CUA provenance checks for {len(files)} data file(s) "
-            "before scoring."
-        ),
-        author="CUA Data Fetcher",
-    ).send()
+    if files_to_validate:
+        await cl.Message(
+            content=(
+                f"Running mandatory CUA provenance checks for {len(files_to_validate)} of {len(files)} "
+                "data file(s) before scoring."
+            ),
+            author="CUA Data Fetcher",
+        ).send()
+    else:
+        await cl.Message(
+            content=f"Reusing cached CUA validation for all {len(files)} data file(s).",
+            author="CUA Data Fetcher",
+        ).send()
 
     _auto_cua_loop = asyncio.get_running_loop()
 
@@ -961,20 +1068,23 @@ async def _auto_validate_all_data_files_with_cua(draft: PitchDraft, reason: str)
         artifacts["expected_file_format"] = expected_format
         artifacts["expected_source_urls"] = source_urls_override
         artifacts["expected_fetch_notes"] = notes
+        artifacts["validated_file_name"] = file_entry.name
+        artifacts["validated_file_sha256"] = file_entry.sha256
         output["artifacts"] = artifacts
         return file_entry.name, output
 
-    outputs: dict[str, dict[str, Any]] = {}
-    async with cl.Step(name="CUA Data Fetcher", type="tool") as step:
-        step.input = (
-            f"Auto-validating {len(files)} file(s) against submitted source URLs "
-            "(running all CUAs simultaneously)."
-        )
-        step.output = f"Running {len(files)} CUA container(s) in parallel..."
-        results = await asyncio.gather(*[_validate_one(f) for f in files])
-        for name, output in results:
-            outputs[name] = output
-        step.output = "Completed CUA checks for all required data files."
+    if files_to_validate:
+        async with cl.Step(name="CUA Data Fetcher", type="tool") as step:
+            reused_count = len(files) - len(files_to_validate)
+            step.input = (
+                f"Auto-validating {len(files_to_validate)} file(s) against submitted source URLs"
+                + (f"; reusing cached results for {reused_count} file(s)." if reused_count > 0 else ".")
+            )
+            step.output = f"Running {len(files_to_validate)} CUA container(s) in parallel..."
+            results = await asyncio.gather(*[_validate_one(f) for f in files_to_validate])
+            for name, output in results:
+                outputs[name] = output
+            step.output = "Completed CUA checks for all required data files."
 
     combined = _merge_cua_outputs(outputs)
     _set_session_data_fetcher_output(combined)
@@ -1549,6 +1659,156 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         ).send()
 
 
+async def _handle_score_strategy_command(draft: PitchDraft) -> None:
+    """Force a fresh backtest run and produce strategy_scorer output."""
+    if not _BACKTEST_AVAILABLE:
+        await cl.Message(
+            content=(
+                "Backtest agent is unavailable. "
+                "Ensure `anthropic` is installed and `ANTHROPIC_API_KEY` is set."
+            ),
+            author="Scoring Engine",
+        ).send()
+        return
+    if not _STRATEGY_SCORER_AVAILABLE:
+        await cl.Message(
+            content="`strategy_scorer.py` is unavailable. Cannot run `/score-strategy`.",
+            author="Scoring Engine",
+        ).send()
+        return
+
+    roles = _detect_file_roles(draft.uploaded_files, tickers=draft.tickers, thesis=draft.thesis)
+    if not roles["strategy_scripts"]:
+        await cl.Message(
+            content=(
+                "No strategy script found. Upload a `.py` or `.ipynb` file containing your strategy, "
+                "then run `/score-strategy` again."
+            ),
+            author="Scoring Engine",
+        ).send()
+        return
+
+    ticker = draft.tickers[0] if draft.tickers else "UNKNOWN"
+    script_names = ", ".join(f"`{f.name}`" for f in roles["strategy_scripts"])
+
+    strategy_files: list[tuple[str, str]] = []
+    for strategy_file in roles["strategy_scripts"]:
+        try:
+            strategy_files.append(_load_strategy_source_for_backtest(strategy_file))
+        except Exception as exc:
+            await cl.Message(
+                content=f"Could not prepare strategy file `{strategy_file.name}`: {exc}",
+                author="Scoring Engine",
+            ).send()
+            return
+
+    data_files: list[tuple[str, str]] = []
+    for data_file in roles["data_files"] + roles["benchmark_files"]:
+        try:
+            data_files.append((data_file.name, Path(data_file.path).read_text(encoding="utf-8", errors="replace")))
+        except Exception as exc:
+            await cl.Message(
+                content=f"Could not read data file `{data_file.name}`: {exc}",
+                author="Scoring Engine",
+            ).send()
+            return
+
+    await cl.Message(
+        content=f"Forcing strategy scoring for {script_names}. Running a fresh backtest first.",
+        author="Scoring Engine",
+    ).send()
+
+    started_at = asyncio.get_running_loop().time()
+    backtest_result = await cl.make_async(_run_backtest_agent)(
+        strategy_files=strategy_files,
+        data_files=data_files,
+        pitch_context={"name": draft.pitch_id, "ticker": ticker},
+    )
+
+    backtest_path = _pitch_dir(draft.pitch_id) / "agent_outputs" / "backtest_agent.json"
+    _write_json(backtest_path, backtest_result.to_dict())
+
+    if backtest_result.status != "success" or not backtest_result.metrics:
+        await cl.Message(
+            content=(
+                f"Backtest did not produce scoreable metrics.\n"
+                f"- Status: `{backtest_result.status}`\n"
+                f"- Message: {backtest_result.message}\n\n"
+                "Fix the backtest issue and run `/score-strategy` again."
+            ),
+            author="Scoring Engine",
+        ).send()
+        return
+
+    strategy_obj, validation_errors = _validate_and_load_strategy(backtest_result.metrics)
+    if validation_errors or strategy_obj is None:
+        payload = {
+            "status": "invalid_metrics",
+            "errors": validation_errors,
+            "scored": False,
+        }
+        _write_json(_pitch_dir(draft.pitch_id) / "agent_outputs" / "strategy_scorer.json", payload)
+        await cl.Message(
+            content=(
+                "Backtest succeeded, but metrics failed `strategy_scorer` schema validation.\n"
+                + "\n".join(f"- {err}" for err in validation_errors[:8])
+            ),
+            author="Scoring Engine",
+        ).send()
+        return
+
+    scored = _score_strategy(strategy_obj)
+    scorer_payload = {
+        "status": "ok",
+        "scored": True,
+        "disqualified": bool(scored.disqualified),
+        "composite_score": float(scored.composite_score),
+        "disqualification_reasons": list(scored.disqualification_reasons),
+        "component_scores": [
+            {
+                "label": c.label,
+                "category": c.category,
+                "weight": c.weight,
+                "score": round(c.raw_score, 4),
+                "weighted": round(c.weighted_score, 4),
+            }
+            for c in scored.component_scores
+        ],
+        "backtest_status": backtest_result.status,
+        "backtest_attempts": int(backtest_result.attempt_count),
+        "elapsed_seconds": round(asyncio.get_running_loop().time() - started_at, 3),
+    }
+    _write_json(_pitch_dir(draft.pitch_id) / "agent_outputs" / "strategy_scorer.json", scorer_payload)
+    _append_chat_event(
+        draft,
+        "system",
+        f"/score-strategy score={scored.composite_score} disqualified={scored.disqualified}",
+    )
+
+    if scored.disqualified:
+        reasons = "\n".join(f"- {reason}" for reason in scored.disqualification_reasons)
+        await cl.Message(
+            content=(
+                f"Strategy scorer ran successfully but strategy was disqualified.\n"
+                f"- Composite score: `{scored.composite_score}`\n"
+                f"- Reasons:\n{reasons}"
+            ),
+            author="Scoring Engine",
+        ).send()
+        return
+
+    await cl.Message(
+        content=(
+            f"Strategy scorer completed.\n"
+            f"- Composite score: `{scored.composite_score}` / 100\n"
+            f"- Disqualified: `False`\n"
+            f"- Components: `{len(scored.component_scores)}`\n\n"
+            "Run `/evaluate` to include this in the full evaluation flow."
+        ),
+        author="Scoring Engine",
+    ).send()
+
+
 async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None:
     file_name, notes, error = _parse_validate_data_command(content)
     if error:
@@ -1557,6 +1817,24 @@ async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None
         return
 
     source_urls = ", ".join(draft.source_urls) if draft.source_urls else "(none)"
+    matched_entry = next((entry for entry in draft.uploaded_files if entry.name == file_name), None)
+    cached_output = _load_cached_per_file_cua_outputs(draft).get(file_name)
+    if matched_entry is not None and cached_output is not None:
+        _set_session_data_fetcher_output(cached_output)
+        flags = _filter_cua_flags(cached_output.get("flags", []))
+        status = str(cached_output.get("status", "unknown")).lower()
+        if status == "warn" and not flags:
+            status = "ok"
+        await cl.Message(
+            content=(
+                f"Using cached CUA result for `{file_name}` (file unchanged).\n\n"
+                f"**Status:** `{status}`\n"
+                f"**Summary:** {cached_output.get('summary', '') or 'CUA run completed.'}\n\n"
+                f"{_format_flags_md(flags)}"
+            ),
+            author="CUA Data Fetcher",
+        ).send()
+        return
 
     await cl.Message(
         content=f"Validating `{file_name}` against source URLs. This can take a few minutes.",
@@ -1592,11 +1870,21 @@ async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None
         finally:
             await streamer.stop()
 
+        artifacts = output.get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+        artifacts["validated_file_name"] = matched_entry.name if matched_entry is not None else file_name
+        artifacts["validated_file_sha256"] = matched_entry.sha256 if matched_entry is not None else ""
+        output["artifacts"] = artifacts
+
         _set_session_data_fetcher_output(output)
 
-        flags = output.get("flags", []) if isinstance(output.get("flags"), list) else []
+        flags = _filter_cua_flags(output.get("flags", []))
+        status = str(output.get("status", "unknown")).lower()
+        if status == "warn" and not flags:
+            status = "ok"
         step.output = (
-            f"**Status:** `{output.get('status', 'unknown')}`\n"
+            f"**Status:** `{status}`\n"
             f"**Summary:** {output.get('summary', 'CUA run completed.')}\n\n"
             f"**Flags:**\n{_format_flags_md(flags)}"
         )
@@ -1617,10 +1905,13 @@ async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None
         elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
     )
 
-    flags = output.get("flags", []) if isinstance(output.get("flags"), list) else []
+    flags = _filter_cua_flags(output.get("flags", []))
+    status = str(output.get("status", "unknown")).lower()
+    if status == "warn" and not flags:
+        status = "ok"
     await cl.Message(
         content=(
-            f"**Status:** `{output.get('status', 'unknown')}`\n"
+            f"**Status:** `{status}`\n"
             f"**Summary:** {output.get('summary', '') or 'CUA run completed.'}\n\n"
             f"{_format_flags_md(flags)}\n\n"
             "This result will be used automatically in the next evaluation run."
@@ -1804,6 +2095,9 @@ async def on_message(message: cl.Message) -> None:
             return
         if command == "/backtest":
             await _handle_backtest_command(draft)
+            return
+        if command == "/score-strategy":
+            await _handle_score_strategy_command(draft)
             return
         if command == "/validate_data":
             await _handle_validate_data_command(draft, content)

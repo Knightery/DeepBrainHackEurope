@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "scored": true,
+  "disqualified": true,
+  "composite_score": 0.0,
+  "disqualification_reasons": [
+    "Excess return -8.90% <= 0 (underperforms buy-and-hold)",
+    "Sharpe ratio -0.01 <= 0"
+  ],
+  "component_scores": [],
+  "backtest_status": "success",
+  "backtest_attempts": 1,
+  "elapsed_seconds": 81.828
+}

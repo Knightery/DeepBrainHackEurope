@@ -1,0 +1,35 @@
+{
+    "status": "Running evaluation pipeline...",
+    "tasks": [
+        {
+            "title": "Data Loading & Hard Checks",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Backtest Agent",
+            "status": "failed",
+            "forId": null
+        },
+        {
+            "title": "Fabrication Detector",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Pipeline Auditor",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "One-Shot Validator",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Scoring Engine",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}

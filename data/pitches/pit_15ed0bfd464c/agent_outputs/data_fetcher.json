@@ -1,0 +1,111 @@
+{
+  "agent": "data_fetcher",
+  "status": "warn",
+  "confidence": 0.55,
+  "summary": "CUA found potential issues in 1 of 1 data file(s): T10Y2Y_spread.csv.",
+  "flags": [
+    {
+      "code": "BASH_FALLBACK_USED",
+      "message": "[T10Y2Y_spread.csv] Bash/terminal fallback was used. Prefer GUI-first when practical."
+    },
+    {
+      "code": "NO_GET_PAGE_TEXT",
+      "message": "[T10Y2Y_spread.csv] get_page_text was never used; agent may have missed readable page content."
+    }
+  ],
+  "artifacts": {
+    "validated_file_names": [
+      "T10Y2Y_spread.csv"
+    ],
+    "match_rate": 0.55,
+    "per_file": {
+      "T10Y2Y_spread.csv": {
+        "agent": "data_fetcher",
+        "status": "warn",
+        "confidence": 0.55,
+        "summary": "The downloaded file `T10Y2Y(9).csv` is the raw FRED data with:\n- Same dates starting from 1976-06-01\n- Same numeric values (just with trailing zeros like 0.70 vs 0.7)\n- Column named `T10Y2Y` instead of `spread_pct`\n- Includes missing value rows (which the reference excludes)\n\nThe file has been successfully downloaded via the browser GUI. The downloaded file matches the reference data - it's the T10Y2Y (10-year minus 2-year treasury spread) from FRED, just with slight formatting differences and the column renamed.\n\n**Download status: success**\n\n**Downloaded filename:** `T10Y2Y(9).csv`\n\n**Matching rationale versus the reference file:**\n- Source data: FRED T10Y2Y (10-Year Treasury Constant Maturity Minus 2-Year Treasury Constant Maturity spread)\n- Same date range: 1976-06-01 to 2026-02-20\n- Same data values (minor formatting differences: trailing zeros like `0.70` vs `0.7`)\n- Column name difference: downloaded has `T10Y2Y`, reference has `spread_pct` (renamed)\n- Row count difference: downloaded has 12,975 rows (includes empty/missing value rows), reference has 12,426 rows (missing values excluded)\n- All non-missing data values match between the two files\n\n**GUI steps performed:**\n1. Inspected reference file via bash - identified columns `observation_date` and `spread_pct`, date range 1976-06-01 to 2026-02-20\n2. Opened Firefox by clicking the Firefox icon in taskbar\n3. Used Ctrl+L to focus address bar\n4. Typed the FRED URL: `https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y`\n5. Pressed Enter - browser automatically downloaded the CSV file as `T10Y2Y(9).csv` (203 KB)\n6. Verified the downloaded file matches the reference data values",
+        "flags": [
+          {
+            "code": "BASH_FALLBACK_USED",
+            "message": "Bash/terminal fallback was used. Prefer GUI-first when practical."
+          },
+          {
+            "code": "NO_GET_PAGE_TEXT",
+            "message": "get_page_text was never used; agent may have missed readable page content."
+          }
+        ],
+        "artifacts": {
+          "requested_file": "T10Y2Y_spread.csv",
+          "staged_reference": "reference_pit_15ed0bfd464c_T10Y2Y_spread.csv",
+          "source_urls_checked": [
+            "https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y"
+          ],
+          "downloaded_files": [
+            "/home/computeruse/Downloads/T10Y2Y(9).csv"
+          ],
+          "candidate_downloaded_files": [
+            "/home/computeruse/Downloads/T10Y2Y(9).csv"
+          ],
+          "validation": {
+            "status": "success",
+            "issues": [],
+            "advisories": [
+              {
+                "code": "BASH_FALLBACK_USED",
+                "message": "Bash/terminal fallback was used. Prefer GUI-first when practical."
+              },
+              {
+                "code": "NO_GET_PAGE_TEXT",
+                "message": "get_page_text was never used; agent may have missed readable page content."
+              }
+            ],
+            "selected_files": [
+              "/home/computeruse/Downloads/T10Y2Y(9).csv"
+            ],
+            "tool_usage": {
+              "used_bash": true,
+              "used_gui_tool": true,
+              "click_detected": true,
+              "screenshot_taken": true,
+              "get_page_text_used": false,
+              "tool_count": 19
+            }
+          },
+          "return_code": 0,
+          "match_rate": 0.55,
+          "match_review": {
+            "verdict": "match",
+            "confidence": 1.0,
+            "best_candidate": "T10Y2Y(9).csv",
+            "reason": "The candidate file contains identical dates and numerical values to the reference file (e.g., 1976-06-01 is 0.68 in both). The column header 'T10Y2Y' is the standard ticker for the requested spread and matches the data in the reference column 'spread_pct'.",
+            "retry_guidance": "Find a different source download that better matches schema/entities/date range."
+          },
+          "attempt_history": [
+            {
+              "attempt": 1,
+              "start_url": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y",
+              "status": "warn",
+              "match_review": {
+                "verdict": "match",
+                "confidence": 1.0,
+                "best_candidate": "T10Y2Y(9).csv",
+                "reason": "The candidate file contains identical dates and numerical values to the reference file (e.g., 1976-06-01 is 0.68 in both). The column header 'T10Y2Y' is the standard ticker for the requested spread and matches the data in the reference column 'spread_pct'.",
+                "retry_guidance": "Find a different source download that better matches schema/entities/date range."
+              },
+              "downloaded_files": [
+                "/home/computeruse/Downloads/T10Y2Y(9).csv"
+              ],
+              "candidate_downloaded_files": [
+                "/home/computeruse/Downloads/T10Y2Y(9).csv"
+              ]
+            }
+          ],
+          "validated_file_name": "T10Y2Y_spread.csv",
+          "validated_file_sha256": "d60ed6167b1aa4bd3c30e8b0c9254ee94d4cc0eae5b643ca12f877dc9208fb11"
+        },
+        "latency_ms": 207791
+      }
+    }
+  },
+  "latency_ms": 207791
+}
