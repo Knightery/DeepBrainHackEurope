@@ -106,7 +106,8 @@ class CuaLiveStreamer:
         wait_label: str = "[CUA] Waiting for container output...",
         update_interval_seconds: float = 0.7,
         heartbeat_interval_seconds: float = 2.0,
-        max_lines: int = 25,
+        max_lines: int = 0,
+        max_buffer_lines: int = 2000,
         error_tag: str = "CUA live flush failed",
     ) -> None:
         self._loop = loop
@@ -116,9 +117,11 @@ class CuaLiveStreamer:
         self._update_interval = update_interval_seconds
         self._heartbeat_interval = heartbeat_interval_seconds
         self._max_lines = max_lines
+        self._max_buffer_lines = max(200, max_buffer_lines)
         self._error_tag = error_tag
 
         self._lines: list[str] = []
+        self._dropped_line_count = 0
         self._lines_lock = threading.Lock()
         self._message: cl.Message | None = None
         self._last_update = 0.0
@@ -131,8 +134,11 @@ class CuaLiveStreamer:
     async def _flush(self) -> None:
         async with self._flush_lock:
             with self._lines_lock:
-                snapshot = list(self._lines[-self._max_lines :])
+                snapshot = list(self._lines[-self._max_lines :]) if self._max_lines > 0 else list(self._lines)
+                dropped = self._dropped_line_count
             body = "\n".join(snapshot) if snapshot else self._wait_label
+            if dropped > 0:
+                body = f"[CUA] Earlier logs omitted: {dropped} line(s)\n" + body
             idle_secs = int(max(0.0, time.time() - self._last_activity))
             elapsed_secs = int(max(0.0, time.time() - self._started))
             content = (
@@ -177,6 +183,10 @@ class CuaLiveStreamer:
 
         with self._lines_lock:
             self._lines.append(stripped)
+            overflow = len(self._lines) - self._max_buffer_lines
+            if overflow > 0:
+                del self._lines[:overflow]
+                self._dropped_line_count += overflow
         now = time.time()
         self._last_activity = now
         if now - self._last_update <= self._update_interval:
