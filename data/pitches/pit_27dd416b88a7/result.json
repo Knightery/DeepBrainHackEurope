@@ -1,0 +1,178 @@
+{
+  "pitch_id": "pit_27dd416b88a7",
+  "status": "completed",
+  "overall_score": 0.0,
+  "allocation_usd": 0,
+  "decision": "needs_clarification",
+  "validation_outcome": "needs_clarification",
+  "user_facing_message": "I found issues that need clarification before final review.",
+  "validation_summary": "Backtest period (2021-2026) is too short to validate a macro thesis based on recession cycles. | Potential use of same-day macro data and SMA values for trading decisions. | [T10Y2Y_spread.csv] Could not parse JSON result from CUA output.",
+  "validation_questions": [
+    "The backtest covers only 2021-2026, yet your thesis relies on yield curve inversions predicting recessions over long cycles. Can you extend the backtest to include historical recessionary periods (e.g., 2000, 2008) to statistically validate the signal?",
+    "Are the 10Y-2Y spread and the 200-day SMA lagged by one day in your code? Using same-day values for these indicators implies trading on data (like closing yields or prices) that is not fully available until the market closes."
+  ],
+  "hard_reject_reasons": [
+    "Excess return -8.90% <= 0 (underperforms buy-and-hold)",
+    "Alpha -0.0252 <= 0",
+    "Sharpe ratio -0.01 <= 0"
+  ],
+  "agent_outputs": {
+    "data_fetcher": {
+      "agent": "data_fetcher",
+      "status": "warn",
+      "confidence": 0.2,
+      "summary": "CUA found potential issues in 1 of 1 data file(s): T10Y2Y_spread.csv.",
+      "flags": [
+        {
+          "code": "CUA_OUTPUT_PARSE_FAILED",
+          "message": "[T10Y2Y_spread.csv] Could not parse JSON result from CUA output."
+        }
+      ],
+      "artifacts": {
+        "validated_file_names": [
+          "T10Y2Y_spread.csv"
+        ],
+        "match_rate": 0.0,
+        "per_file": {
+          "T10Y2Y_spread.csv": {
+            "agent": "data_fetcher",
+            "status": "fail",
+            "confidence": 0.2,
+            "summary": "CUA run completed but returned unparsable output.",
+            "flags": [
+              {
+                "code": "CUA_OUTPUT_PARSE_FAILED",
+                "message": "Could not parse JSON result from CUA output."
+              }
+            ],
+            "artifacts": {
+              "attempt": 3,
+              "return_code": 1,
+              "stdout_tail": "",
+              "stderr_tail": "error during connect: Get \"http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/networks?filters=%7B%22name%22%3A%7B%22cua_default%22%3Atrue%7D%7D\": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.\n",
+              "attempt_history": [],
+              "expected_file_format": "csv",
+              "expected_source_urls": [
+                "https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y"
+              ],
+              "expected_fetch_notes": "automatic full-pitch validation (/evaluate)\nexpected_reference_file=T10Y2Y_spread.csv\ngoal: confirm the data on the source page(s) is consistent with what the user submitted \u2014 same entity, same rough date range, same order of magnitude for prices/values\ndo NOT fail because of missing columns or format differences \u2014 the user may have cleaned or subsetted the data\nflag only if the source page shows clearly different data, a different asset, or the page is unreachable\nexpected_source_urls=https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y"
+            },
+            "latency_ms": 881
+          }
+        }
+      },
+      "latency_ms": 881
+    },
+    "data_validator": {
+      "agent": "data_validator",
+      "status": "ok",
+      "confidence": 1.0,
+      "summary": "The uploaded data appears to be authentic historical Treasury yield spread data (T10Y2Y) sourced from FRED. The values (mean ~0.85, range -2.41 to 2.91) are consistent with historical economic records since 1976. The backtest results are realistic (negative Sharpe, low CAGR), showing no signs of performance inflation or data manipulation.",
+      "flags": [],
+      "artifacts": {
+        "data_quality_score": 1.0,
+        "row_count": 12426,
+        "symbol_count": 1,
+        "data_source": "uploaded_csv_tsv",
+        "alpaca_fallback_timeframe": null,
+        "alpaca_fallback_window": null,
+        "llm_artifacts": {
+          "verdict": "clean",
+          "questions": []
+        }
+      },
+      "latency_ms": 9417
+    },
+    "pipeline_auditor": {
+      "agent": "pipeline_auditor",
+      "status": "warn",
+      "confidence": 0.95,
+      "summary": "The strategy employs a regime-switching approach using the 10Y-2Y Treasury spread and a 200-day SMA on SPY. While the logic is sound in theory, the backtest validation is limited to a 5-year window (2021-2026), which is insufficient to verify a thesis based on historical recession cycles. Additionally, the use of daily macro data and SMA indicators requires strict lagging to prevent look-ahead bias, which may be inflating the drawdown reduction metrics.",
+      "flags": [
+        {
+          "code": "METHOD_WARN",
+          "message": "No explicit out-of-sample or walk-forward validation noted."
+        },
+        {
+          "code": "WEAK_VALIDATION",
+          "message": "Backtest period (2021-2026) is too short to validate a macro thesis based on recession cycles."
+        },
+        {
+          "code": "LOOK_AHEAD_BIAS",
+          "message": "Potential use of same-day macro data and SMA values for trading decisions."
+        },
+        {
+          "code": "STRATEGY_SCORER_REQUIRED",
+          "message": "Backtest strategy scoring is required. CSV approximation scoring is disabled."
+        }
+      ],
+      "artifacts": {
+        "methodology_score": 0.5,
+        "llm_artifacts": {
+          "verdict": "errors_found",
+          "questions": [
+            "The backtest covers only 2021-2026, yet your thesis relies on yield curve inversions predicting recessions over long cycles. Can you extend the backtest to include historical recessionary periods (e.g., 2000, 2008) to statistically validate the signal?",
+            "Are the 10Y-2Y spread and the 200-day SMA lagged by one day in your code? Using same-day values for these indicators implies trading on data (like closing yields or prices) that is not fully available until the market closes."
+          ]
+        }
+      },
+      "latency_ms": 57540
+    },
+    "scoring": {
+      "agent": "scoring",
+      "status": "ok",
+      "confidence": 0.3,
+      "summary": "Strategy-scorer output unavailable.",
+      "flags": [],
+      "artifacts": {
+        "source": "strategy_scorer_unavailable",
+        "sharpe": -0.1139,
+        "max_drawdown": -1.0,
+        "risk_score": 1.0,
+        "time_to_return_days": null,
+        "one_shot_mode": false,
+        "one_shot_recommendation": null,
+        "one_shot_artifacts": null,
+        "backtest_attempt_count": 1,
+        "backtest_metrics": {
+          "backtest_start": "2021-06-16",
+          "backtest_end": "2026-02-20",
+          "cagr": 0.036215,
+          "total_return": 0.180592,
+          "volatility": 0.085352,
+          "sharpe_ratio": -0.009076,
+          "sortino_ratio": -0.007878,
+          "calmar_ratio": 0.230654,
+          "max_drawdown": -0.157011,
+          "max_drawdown_duration": 931,
+          "total_trades": 8,
+          "win_rate": 0.375,
+          "avg_win": 0.078012,
+          "avg_loss": -0.013296,
+          "profit_factor": 3.520291,
+          "expectancy": 0.020944,
+          "benchmark_cagr": 0.125261,
+          "benchmark_max_drawdown": -0.24512,
+          "benchmark_total_return": 0.734528,
+          "alpha": -0.025191,
+          "information_ratio": -0.633039,
+          "excess_return": -0.089045,
+          "up_capture": 0.347858,
+          "down_capture": 0.355546,
+          "name": "pit_27dd416b88a7",
+          "ticker": "SPY"
+        },
+        "composite_score": 0.0,
+        "disqualified": true,
+        "disqualification_reasons": [
+          "Excess return -8.90% <= 0 (underperforms buy-and-hold)",
+          "Alpha -0.0252 <= 0",
+          "Sharpe ratio -0.01 <= 0"
+        ],
+        "component_scores": {}
+      },
+      "latency_ms": 0
+    }
+  },
+  "report_markdown": "# Pitch Result: `pit_27dd416b88a7`\n\n- Decision: **needs_clarification**\n- Validation outcome: **needs_clarification**\n- User message: **I found issues that need clarification before final review.**\n- Overall score: **0.0** / 100\n- Allocation (USD): **0**\n\n## Metrics\n- Sharpe: `-0.1139`\n- Max drawdown: `-1.0`\n- Risk score: `1.0`\n- Data quality score: `1.0`\n- Methodology score: `0.5`\n- Match rate: `0.0`\n- Scoring source: `strategy_scorer_unavailable`\n\n## Hard Reject Reasons\n- Excess return -8.90% <= 0 (underperforms buy-and-hold)\n- Alpha -0.0252 <= 0\n- Sharpe ratio -0.01 <= 0\n\n## Clarification Questions\n- The backtest covers only 2021-2026, yet your thesis relies on yield curve inversions predicting recessions over long cycles. Can you extend the backtest to include historical recessionary periods (e.g., 2000, 2008) to statistically validate the signal?\n- Are the 10Y-2Y spread and the 200-day SMA lagged by one day in your code? Using same-day values for these indicators implies trading on data (like closing yields or prices) that is not fully available until the market closes.\n\n## Agent Flags\n- `data_fetcher` `CUA_OUTPUT_PARSE_FAILED`: [T10Y2Y_spread.csv] Could not parse JSON result from CUA output.\n- `data_validator`: no flags\n- `pipeline_auditor` `METHOD_WARN`: No explicit out-of-sample or walk-forward validation noted.\n- `pipeline_auditor` `WEAK_VALIDATION`: Backtest period (2021-2026) is too short to validate a macro thesis based on recession cycles.\n- `pipeline_auditor` `LOOK_AHEAD_BIAS`: Potential use of same-day macro data and SMA values for trading decisions.\n- `pipeline_auditor` `STRATEGY_SCORER_REQUIRED`: Backtest strategy scoring is required. CSV approximation scoring is disabled."
+}

@@ -1,0 +1,46 @@
+{
+  "agent": "data_fetcher",
+  "status": "warn",
+  "confidence": 0.2,
+  "summary": "CUA found potential issues in 1 of 1 data file(s): T10Y2Y_spread.csv.",
+  "flags": [
+    {
+      "code": "CUA_OUTPUT_PARSE_FAILED",
+      "message": "[T10Y2Y_spread.csv] Could not parse JSON result from CUA output."
+    }
+  ],
+  "artifacts": {
+    "validated_file_names": [
+      "T10Y2Y_spread.csv"
+    ],
+    "match_rate": 0.0,
+    "per_file": {
+      "T10Y2Y_spread.csv": {
+        "agent": "data_fetcher",
+        "status": "fail",
+        "confidence": 0.2,
+        "summary": "CUA run completed but returned unparsable output.",
+        "flags": [
+          {
+            "code": "CUA_OUTPUT_PARSE_FAILED",
+            "message": "Could not parse JSON result from CUA output."
+          }
+        ],
+        "artifacts": {
+          "attempt": 3,
+          "return_code": 1,
+          "stdout_tail": "",
+          "stderr_tail": "error during connect: Get \"http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/networks?filters=%7B%22name%22%3A%7B%22cua_default%22%3Atrue%7D%7D\": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.\n",
+          "attempt_history": [],
+          "expected_file_format": "csv",
+          "expected_source_urls": [
+            "https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y"
+          ],
+          "expected_fetch_notes": "automatic full-pitch validation (/evaluate)\nexpected_reference_file=T10Y2Y_spread.csv\ngoal: confirm the data on the source page(s) is consistent with what the user submitted \u2014 same entity, same rough date range, same order of magnitude for prices/values\ndo NOT fail because of missing columns or format differences \u2014 the user may have cleaned or subsetted the data\nflag only if the source page shows clearly different data, a different asset, or the page is unreachable\nexpected_source_urls=https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y"
+        },
+        "latency_ms": 881
+      }
+    }
+  },
+  "latency_ms": 881
+}

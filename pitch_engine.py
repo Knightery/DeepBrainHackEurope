@@ -1124,6 +1124,7 @@ def validate_data_with_cua(
     file_to_validate: str,
     notes: str = "",
     source_urls_override: list[str] | None = None,
+    log_callback: Any = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     file_entry = _find_uploaded_file(draft, file_to_validate)
@@ -1237,31 +1238,20 @@ def validate_data_with_cua(
             staged_reference_name,
         ]
 
+        # --- Streaming subprocess: captures stdout+stderr line-by-line so
+        #     log_callback receives live progress as the CUA container runs.
+        import queue as _queue
+        import threading as _threading
+
         try:
-            completed = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 cwd=_cua_dir(),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                check=False,
-                timeout=run_timeout,
+                bufsize=1,
             )
-        except subprocess.TimeoutExpired:
-            last_failure_output = {
-                "agent": "data_fetcher",
-                "status": "fail",
-                "confidence": 0.0,
-                "summary": f"CUA run timed out after {run_timeout}s.",
-                "flags": [
-                    {
-                        "code": "CUA_RUN_TIMEOUT",
-                        "message": f"Timeout after {run_timeout}s while running docker compose.",
-                    }
-                ],
-                "artifacts": {"attempt": attempt, "command": " ".join(command)},
-                "latency_ms": int((time.perf_counter() - started) * 1000),
-            }
-            break
         except Exception as exc:
             last_failure_output = {
                 "agent": "data_fetcher",
@@ -1278,6 +1268,73 @@ def validate_data_with_cua(
                 "latency_ms": int((time.perf_counter() - started) * 1000),
             }
             break
+
+        _line_q: _queue.Queue = _queue.Queue()
+        _stdout_lines: list[str] = []
+
+        def _reader_thread(pipe: Any, q: _queue.Queue) -> None:
+            try:
+                for _ln in iter(pipe.readline, ""):
+                    q.put(_ln)
+            finally:
+                q.put(None)
+
+        _rt = _threading.Thread(target=_reader_thread, args=(proc.stdout, _line_q), daemon=True)
+        _rt.start()
+
+        _timed_out = False
+        _run_t0 = time.perf_counter()
+        while True:
+            try:
+                _ln = _line_q.get(timeout=1.0)
+            except _queue.Empty:
+                if time.perf_counter() - _run_t0 > run_timeout:
+                    proc.kill()
+                    _timed_out = True
+                break
+            if _ln is None:
+                break
+            _stdout_lines.append(_ln)
+            if log_callback is not None:
+                try:
+                    log_callback(_ln.rstrip())
+                except Exception:
+                    pass
+            if time.perf_counter() - _run_t0 > run_timeout:
+                proc.kill()
+                _timed_out = True
+                break
+
+        _rt.join(timeout=5)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+        if _timed_out:
+            last_failure_output = {
+                "agent": "data_fetcher",
+                "status": "fail",
+                "confidence": 0.0,
+                "summary": f"CUA run timed out after {run_timeout}s.",
+                "flags": [
+                    {
+                        "code": "CUA_RUN_TIMEOUT",
+                        "message": f"Timeout after {run_timeout}s while running docker compose.",
+                    }
+                ],
+                "artifacts": {"attempt": attempt, "command": " ".join(command)},
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            }
+            break
+
+        class _Completed:
+            stdout = "".join(_stdout_lines)
+            stderr = ""
+            returncode = proc.returncode
+
+        completed = _Completed()
 
         parsed = _extract_json_after_separator((completed.stdout or "") + "\n" + (completed.stderr or ""))
         if not parsed:

@@ -6,6 +6,7 @@ import logging
 import re
 import shlex
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,6 +117,42 @@ MAX_TOOL_CHARS = 12000
 MAX_TOOL_LINES = 300
 MAX_TOOL_CELLS = 8
 _LOGGER = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Backtest flavor text
+# ---------------------------------------------------------------------------
+
+_BACKTEST_FLAVOR = [
+    "Interrogating the Sharpe ratio...",
+    "Cross-referencing alpha with Jensen’s model...",
+    "Auditing for look-ahead bias...",
+    "Bribing the benchmark...",
+    "Calibrating max drawdown thresholds...",
+    "Challenging the win rate assumptions...",
+    "Computing Monte Carlo tail risk...",
+    "Reviewing trade execution slippage...",
+    "Stress-testing regime-change sensitivity...",
+    "Auditing position sizing logic...",
+    "Negotiating with the Sortino ratio...",
+    "Validating signal generation pipeline...",
+    "Decomposing factor exposures...",
+    "Checking for survivorship bias...",
+    "Verifying annualisation assumptions...",
+]
+
+
+async def _backtest_flavor_task(msg: cl.Message) -> None:
+    """Cycle quant-flavoured status text while the backtest worker runs."""
+    import itertools
+    texts = itertools.cycle(_BACKTEST_FLAVOR)
+    while True:
+        await asyncio.sleep(2.2)
+        msg.content = f"⏳ **Backtest running…** {next(texts)}"
+        try:
+            await msg.update()
+        except Exception:
+            break
+
 
 
 def _now_iso() -> str:
@@ -880,15 +917,47 @@ async def _auto_validate_all_data_files_with_cua(draft: PitchDraft, reason: str)
         author="CUA Data Fetcher",
     ).send()
 
+    _auto_cua_loop = asyncio.get_running_loop()
+
     async def _validate_one(file_entry: UploadedFile) -> tuple[str, dict[str, Any]]:
         notes, source_urls_override, expected_format = _build_cua_context_for_file(draft, file_entry, reason)
+
+        # Per-file live log stream
+        _lines: list[str] = []
+        _log_msg: list[cl.Message | None] = [None]
+        _last_t: list[float] = [0.0]
+
+        async def _flush() -> None:
+            txt = "```\n" + "\n".join(_lines[-25:]) + "\n```"
+            if _log_msg[0] is None:
+                _log_msg[0] = cl.Message(
+                    content=txt, author=f"CUA Live — {file_entry.name}"
+                )
+                await _log_msg[0].send()
+            else:
+                _log_msg[0].content = txt
+                await _log_msg[0].update()
+
+        def _cb(line: str) -> None:
+            s = line.strip()
+            if not s:
+                return
+            _lines.append(s)
+            now = time.time()
+            if now - _last_t[0] > 0.7:
+                _last_t[0] = now
+                asyncio.run_coroutine_threadsafe(_flush(), _auto_cua_loop)
+
         try:
             output = await cl.make_async(validate_data_with_cua)(
                 draft,
                 file_entry.name,
                 notes,
                 source_urls_override,
+                log_callback=_cb,
             )
+            if _lines:
+                await _flush()
         except Exception as exc:
             output = {
                 "agent": "data_fetcher",
@@ -1398,11 +1467,25 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
             s2.input = f"Running backtest with {BACKTEST_TIMEOUT_SECONDS}s timeout."
             s2.output = "Executing..."
 
-        result = await cl.make_async(_run_backtest_agent)(
-            strategy_files=_strat_files,
-            data_files=_data_files,
-            pitch_context={"name": draft.pitch_id, "ticker": ticker},
-        )
+        _flavor_msg = await cl.Message(
+            content="⏳ **Backtest running…** Initializing agent...",
+            author="Backtest Agent",
+        ).send()
+        _flavor_task = asyncio.create_task(_backtest_flavor_task(_flavor_msg))
+        try:
+            result = await cl.make_async(_run_backtest_agent)(
+                strategy_files=_strat_files,
+                data_files=_data_files,
+                pitch_context={"name": draft.pitch_id, "ticker": ticker},
+            )
+        finally:
+            _flavor_task.cancel()
+            try:
+                await _flavor_task
+            except asyncio.CancelledError:
+                pass
+            _flavor_msg.content = "✅ **Backtest execution complete.**"
+            await _flavor_msg.update()
 
         async with cl.Step(name="Phase 3: Validate Output", type="tool") as s3:
             s3.input = "Claude reviews the JSON output for completeness and sanity."
@@ -1455,6 +1538,48 @@ async def _handle_backtest_command(draft: PitchDraft) -> None:
         ]
         await cl.Message(content="\n".join(lines), author="Backtest Agent").send()
 
+        # --- Equity curve chart (optional — only present if backtest script emitted curves) ---
+        equity_curve = m.get("equity_curve")
+        benchmark_curve = m.get("benchmark_curve")
+        if equity_curve and isinstance(equity_curve, list) and len(equity_curve) > 1:
+            try:
+                import plotly.graph_objects as go  # noqa: PLC0415
+                from plotly.subplots import make_subplots  # noqa: PLC0415
+
+                dates_s = [pt[0] for pt in equity_curve]
+                vals_s = [pt[1] for pt in equity_curve]
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=dates_s, y=vals_s,
+                    name="Strategy",
+                    line=dict(color="#00e676", width=2),
+                    fill="tozeroy",
+                    fillcolor="rgba(0,230,118,0.07)",
+                ))
+
+                if benchmark_curve and isinstance(benchmark_curve, list) and len(benchmark_curve) > 1:
+                    dates_b = [pt[0] for pt in benchmark_curve]
+                    vals_b = [pt[1] for pt in benchmark_curve]
+                    fig.add_trace(go.Scatter(
+                        x=dates_b, y=vals_b,
+                        name="Benchmark (B&H)",
+                        line=dict(color="#9e9e9e", width=1.5, dash="dot"),
+                    ))
+
+                fig.update_layout(
+                    title="📈 Equity Curve (normalised, start = 1.0)",
+                    xaxis_title="Date",
+                    yaxis_title="Portfolio value",
+                    template="plotly_dark",
+                    height=380,
+                    margin=dict(l=40, r=20, t=50, b=40),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                await cl.Plotly(figure=fig, display="inline", size="large").send()
+            except Exception as _chart_exc:
+                _LOGGER.debug("Equity curve chart failed: %s", _chart_exc)
+
     elif result.status == "user_action_required":
         await cl.Message(
             content=(
@@ -1499,11 +1624,41 @@ async def _handle_validate_data_command(draft: PitchDraft, content: str) -> None
         has_notes=bool(notes),
     )
 
+    # --- Live log streaming callback for CUA ---
+    _cua_loop = asyncio.get_running_loop()
+    _cua_log_lines: list[str] = []
+    _cua_log_msg: list[cl.Message | None] = [None]  # mutable container for nonlocal
+    _cua_last_update: list[float] = [0.0]
+
+    async def _flush_cua_log() -> None:
+        content = "```\n" + "\n".join(_cua_log_lines[-25:]) + "\n```"
+        if _cua_log_msg[0] is None:
+            _cua_log_msg[0] = cl.Message(content=content, author="CUA Live Feed")
+            await _cua_log_msg[0].send()
+        else:
+            _cua_log_msg[0].content = content
+            await _cua_log_msg[0].update()
+
+    def _cua_log_cb(line: str) -> None:
+        stripped = line.strip()
+        if not stripped:
+            return
+        _cua_log_lines.append(stripped)
+        now = time.time()
+        if now - _cua_last_update[0] > 0.7:
+            _cua_last_update[0] = now
+            asyncio.run_coroutine_threadsafe(_flush_cua_log(), _cua_loop)
+
     async with cl.Step(name="CUA Data Fetcher", type="tool") as step:
         step.input = f"File: `{file_name}` | Sources: {source_urls} | Notes: {notes or '(none)'}"
         step.output = "Running browser automation via Docker..."
 
-        output = await cl.make_async(validate_data_with_cua)(draft, file_name or "", notes or "")
+        output = await cl.make_async(validate_data_with_cua)(
+            draft, file_name or "", notes or "", log_callback=_cua_log_cb
+        )
+        # Final flush
+        if _cua_log_lines:
+            await _flush_cua_log()
 
         _set_session_data_fetcher_output(output)
 
@@ -1778,7 +1933,17 @@ async def on_message(message: cl.Message) -> None:
         draft.status = "ready"
 
     _save_pitch_snapshot(draft)
-    await cl.Message(content=f"{assistant_reply}\n\n{_checklist_markdown(draft)}", author="Clarifier Agent").send()
+
+    # Stream the clarifier reply word-by-word for a live typing effect, then
+    # append the checklist once streaming is complete.
+    _cl_stream_msg = cl.Message(content="", author="Clarifier Agent")
+    await _cl_stream_msg.send()
+    _reply_words = assistant_reply.split(" ")
+    for _wi, _wt in enumerate(_reply_words):
+        await _cl_stream_msg.stream_token(_wt + (" " if _wi < len(_reply_words) - 1 else ""))
+        await asyncio.sleep(0.012)  # ~80 words/sec — fast but visibly animated
+    _cl_stream_msg.content = f"{assistant_reply}\n\n{_checklist_markdown(draft)}"
+    await _cl_stream_msg.update()
 
     actions_handled = await _execute_orchestrator_actions(draft, clarifier_actions) if clarifier_actions else False
 

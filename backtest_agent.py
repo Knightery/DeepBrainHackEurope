@@ -534,6 +534,21 @@ SOLANA FUNCTION TO COPY VERBATIM:
 
 {schema}
 
+OPTIONAL EXTRAS — strongly recommended for visualisation (wrap ENTIRELY in try/except; NEVER let them crash the script or affect the required JSON fields above):
+After computing all required metrics, also emit two normalised equity curve series in the same JSON object:
+  "equity_curve":    [["YYYY-MM-DD", float], ...],  // strategy portfolio value, normalised so first bar = 1.0
+  "benchmark_curve": [["YYYY-MM-DD", float], ...],  // benchmark portfolio value, normalised so first bar = 1.0
+One entry per trading bar. If the series would exceed 1000 points, downsample evenly so output stays ≤1000 entries.
+Both series MUST start at exactly 1.0. Example emission code (adapt as needed):
+  try:
+      _eq = portfolio_value_series / portfolio_value_series.iloc[0]
+      _bm = benchmark_value_series / benchmark_value_series.iloc[0]
+      _step = max(1, len(_eq) // 1000)
+      metrics["equity_curve"] = [[str(d)[:10], round(float(v), 6)] for d, v in zip(_eq.index[::_step], _eq.iloc[::_step])]
+      metrics["benchmark_curve"] = [[str(d)[:10], round(float(v), 6)] for d, v in zip(_bm.index[::_step], _bm.iloc[::_step])]
+  except Exception:
+      pass  # curves are optional — never fail the script over them
+
 CRITICAL: Output ONLY the Python script. No explanation, no markdown fences, no prose.
 Just raw Python code starting with imports.
 """
