@@ -242,6 +242,7 @@ app.mount("/home/static", StaticFiles(directory=HOME_DIR), name="home-static")
 if PUBLIC_DIR.exists():
     app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public-static")
 
+# Mount Chainlit app at /app (run from project root: uvicorn server:app --host 0.0.0.0 --port 8000)
 try:
     from chainlit.utils import mount_chainlit
 

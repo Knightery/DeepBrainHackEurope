@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Anyquant | Alpha Can Come From Anyone</title>
+    <title>OpenQuant | Alpha Can Come From Anyone</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,500;1,600&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
         html { scroll-behavior: auto; overscroll-behavior: none; }
@@ -25,7 +25,23 @@
             backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
             box-shadow: 0 1px 0 rgba(255,255,255,0.06);
         }
-        .logo img { height: 28px; display: block; filter: brightness(1.1); }
+        .logo {
+            display: inline-flex; align-items: center; gap: 10px;
+            color: #fff; text-decoration: none; font-size: 1.75rem;
+            letter-spacing: 0.02em;
+        }
+        .logo-pixels {
+            display: flex; flex-direction: column; gap: 2px;
+            align-self: center; line-height: 0;
+            transform: translateY(2px);
+        }
+        .logo-pixels span {
+            display: block; width: 6px; height: 6px; background: #fff;
+        }
+        .logo-open, .logo-quant {
+            font-family: 'Cormorant Garamond', Georgia, serif;
+            font-style: italic; font-weight: 600; line-height: 1;
+        }
         .btn-launch {
             display: inline-flex; align-items: center; gap: 6px;
             padding: 9px 22px; background: #fff; color: #000;
@@ -90,8 +106,14 @@
 <body>
 
     <nav id="navbar">
-        <a class="logo" href="/home"><img src="/home/static/Anyquant_banner.png" alt="Anyquant"></a>
-        <a href="/app" class="btn-launch">Launch App <span>→</span></a>
+        <a class="logo" href="/home">
+            <span class="logo-pixels"><span></span><span></span><span></span></span>
+            <span><span class="logo-open">Open</span><span class="logo-quant">Quant</span></span>
+        </a>
+        <div style="display:flex;align-items:center;gap:24px;">
+            <a href="/eva-api" style="color:rgba(255,255,255,0.6);text-decoration:none;font-size:0.88rem;font-weight:500;transition:color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='rgba(255,255,255,0.6)'">Eva API</a>
+            <a href="/app" class="btn-launch">Launch App <span>→</span></a>
+        </div>
     </nav>
 
     <div class="scroll-indicator" id="scrollIndicator">
