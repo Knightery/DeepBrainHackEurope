@@ -55,3 +55,14 @@ temp/
 
 # Archived / non-essential files
 archive/
+
+# Runtime / generated data
+data/
+cua/downloads/
+
+# Chainlit runtime
+.chainlit/
+.files/
+.tmp_chainlit_test/
+.tmp_wheels_311/
+.tmp_wheels_312/
