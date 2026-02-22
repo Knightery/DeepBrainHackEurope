@@ -871,6 +871,10 @@ def _phase_run(
     tmp_root = tmp_dir.resolve()
 
     def _write_staged_file(filename: str, content: str) -> None:
+        # Reject cross-platform path traversal (catches Windows-style "\\" on Linux too)
+        parts = filename.replace("\\", "/").split("/")
+        if ".." in parts or any(p == "" and i > 0 for i, p in enumerate(parts)):
+            raise ValueError(f"Unsafe staged filename: {filename!r}")
         target = (tmp_root / filename).resolve()
         try:
             target.relative_to(tmp_root)
